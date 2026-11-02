@@ -9,9 +9,14 @@ use syntect::parsing::SyntaxSet;
 pub const DEFAULT_DARK_THEME: &str = "base16-ocean.dark";
 pub const DEFAULT_LIGHT_THEME: &str = "InspiredGitHub";
 
+/// syntect's built-in syntaxes plus the extra grammars in `assets/syntaxes`,
+/// precompiled by `build.rs`.
 pub fn syntaxes() -> &'static SyntaxSet {
     static SET: OnceLock<SyntaxSet> = OnceLock::new();
-    SET.get_or_init(SyntaxSet::load_defaults_newlines)
+    SET.get_or_init(|| {
+        let bundle = include_bytes!(concat!(env!("OUT_DIR"), "/syntaxes.packdump"));
+        syntect::dumps::from_uncompressed_data(bundle).expect("syntax bundle is valid")
+    })
 }
 
 pub fn themes() -> &'static ThemeSet {
@@ -44,6 +49,18 @@ fn background_is_light(colorfgbg: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_grammars_are_included() {
+        let set = syntaxes();
+        assert_eq!(
+            set.find_syntax_by_extension("ts").unwrap().name,
+            "TypeScript"
+        );
+        assert_eq!(set.find_syntax_by_extension("toml").unwrap().name, "TOML");
+        // Built-in ones are still there.
+        assert_eq!(set.find_syntax_by_extension("rs").unwrap().name, "Rust");
+    }
 
     #[test]
     fn default_themes_exist() {

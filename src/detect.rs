@@ -18,11 +18,8 @@ const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd", "mkdn",
 
 /// Languages missing from syntect's bundled set, mapped to the closest one it has.
 const ALIASES: &[(&str, &str)] = &[
-    ("ts", "js"),
-    ("tsx", "js"),
-    ("mts", "js"),
-    ("cts", "js"),
-    ("typescript", "js"),
+    ("tsx", "ts"),
+    ("typescript", "ts"),
     ("jsx", "js"),
     ("mjs", "js"),
     ("cjs", "js"),
@@ -31,7 +28,6 @@ const ALIASES: &[(&str, &str)] = &[
     ("kotlin", "java"),
     ("jsonc", "json"),
     ("json5", "json"),
-    ("toml", "properties"),
     ("dockerfile", "sh"),
     ("vue", "html"),
     ("svelte", "html"),
@@ -155,12 +151,11 @@ mod tests {
     }
 
     #[test]
-    fn aliases_cover_missing_languages() {
-        assert_eq!(detect_name(&file("app.ts"), "", None), "JavaScript");
-        assert_eq!(
-            detect_name(&file("Cargo.toml"), "", None),
-            "Java Properties"
-        );
+    fn bundled_and_aliased_languages() {
+        assert_eq!(detect_name(&file("app.ts"), "", None), "TypeScript");
+        assert_eq!(detect_name(&file("app.tsx"), "", None), "TypeScript");
+        assert_eq!(detect_name(&file("Cargo.toml"), "", None), "TOML");
+        assert_eq!(detect_name(&file("Cargo.lock"), "", None), "TOML");
     }
 
     #[test]
@@ -184,7 +179,7 @@ mod tests {
         assert_eq!(detect_name(&file("a.rs"), "", Some("plain")), "plain");
         assert_eq!(
             detect_name(&file("a.rs"), "", Some("typescript")),
-            "JavaScript"
+            "TypeScript"
         );
         assert!(by_language(assets::syntaxes(), "nonsense-lang").is_none());
     }

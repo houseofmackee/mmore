@@ -16,3 +16,13 @@ unicode-width = "0.2.3"
 assert_cmd = "2.2.2"
 insta = "1.49.0"
 predicates = "3.1.4"
+
+[build-dependencies]
+syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+
+# The build script compiles the syntax bundle; optimizing it keeps builds fast.
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release.build-override]
+opt-level = 3
