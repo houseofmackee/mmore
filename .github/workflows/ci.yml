@@ -44,3 +44,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Test
         run: cargo test --locked
+      - name: Terminal checks
+        run: |
+          cargo build --locked
+          python3 tests/pty/terminal_checks.py target/debug/mmore

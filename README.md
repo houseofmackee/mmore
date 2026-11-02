@@ -139,8 +139,17 @@ cargo test      # unit, snapshot, and command-line tests
 cargo clippy --all-targets -- -D warnings
 ```
 
-GitHub Actions runs formatting, clippy, and the tests on Linux and macOS for every
-push to `main` and every pull request (`.github/workflows/ci.yml`).
+`tests/pty/terminal_checks.py` runs the built binary in a pseudo-terminal to check
+what unit tests cannot reach: paging keys, search, resizing, colors, hyperlinks,
+the mouse, and the terminal background query. Run it after a build:
+
+```sh
+cargo build && python3 tests/pty/terminal_checks.py
+```
+
+GitHub Actions runs formatting, clippy, the tests, and the terminal checks on Linux
+and macOS for every push to `main` and every pull request
+(`.github/workflows/ci.yml`).
 
 Markdown rendering has snapshot tests (using `insta`) over the documents in
 `tests/fixtures/markdown`. After an intended change to the output, review and
