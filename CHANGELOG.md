@@ -5,6 +5,11 @@ section here, so a version can only be released once it has one.
 
 ## [Unreleased]
 
+### Added
+
+- Compressed files (gzip, bzip2, xz, and zstd) are shown decompressed, and
+  `guide.md.gz` is rendered as Markdown.
+
 ## [0.3.0] - 2026-11-02
 
 ### Added

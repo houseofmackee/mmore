@@ -680,3 +680,80 @@ fn colors_in_plain_files_but_not_in_code() {
         .stdout(predicate::str::contains("^[[31m"));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Compress `text` with `tool` into a fresh file named `name`; `None` if the tool
+/// is not installed.
+fn compressed(
+    tool: &str,
+    name: &str,
+    text: &str,
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join(format!("mmore-cli-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut child = std::process::Command::new(tool)
+        .arg("-c")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(text.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{tool} failed");
+    let path = dir.join(name);
+    std::fs::write(&path, out.stdout).unwrap();
+    Some((dir, path))
+}
+
+#[test]
+fn compressed_files_are_decompressed() {
+    for (tool, ext) in [
+        ("gzip", "gz"),
+        ("bzip2", "bz2"),
+        ("xz", "xz"),
+        ("zstd", "zst"),
+    ] {
+        let Some((dir, path)) = compressed(tool, &format!("notes.txt.{ext}"), "one\ntwo\n") else {
+            eprintln!("skipping {tool}: not installed");
+            continue;
+        };
+        mmore().arg(&path).assert().success().stdout("one\ntwo\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn compressed_markdown_is_rendered_by_its_inner_name() {
+    let Some((dir, path)) = compressed("gzip", "guide.md.gz", "Some *markdown*.\n") else {
+        return;
+    };
+    mmore_env()
+        .args(["--color", "always"])
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\x1b[3mmarkdown\x1b[0m"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn missing_decompressor_is_reported() {
+    let Some((dir, path)) = compressed("gzip", "log.gz", "text\n") else {
+        return;
+    };
+    mmore()
+        .env("PATH", "")
+        .arg(&path)
+        .arg("tests/fixtures/sample.md")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs the gzip command"))
+        .stdout(predicate::str::contains("# Title"));
+    std::fs::remove_dir_all(dir).unwrap();
+}

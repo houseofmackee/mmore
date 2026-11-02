@@ -172,6 +172,15 @@ plain text, unless its first line names a language (`#!/usr/bin/env python3`),
 in which case `mmore` waits for the end and highlights it. Line numbers (`-n`)
 for piped input always leave room for five digits, since its length is unknown.
 
+## Compressed files
+
+Files compressed with gzip, bzip2, xz, or zstd are recognized by their first
+bytes and shown decompressed, using the `gzip`, `bzip2`, `xz`, or `zstd` command
+(which must be installed). What is inside is judged by the name without the
+compression extension, so `guide.md.gz` is rendered as Markdown and `main.rs.xz`
+is highlighted as Rust. Compressed files cannot be opened in the editor (`v`) or
+reloaded.
+
 ## When output is not a terminal
 
 If the output goes to a pipe or a file, `mmore` prints plain text: no rendering,

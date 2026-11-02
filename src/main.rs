@@ -2,6 +2,7 @@ mod ansi;
 mod assets;
 mod background;
 mod cli;
+mod compress;
 mod detect;
 mod document;
 mod pager;
@@ -132,15 +133,42 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
     let mut all_ok = true;
 
     for origin in origins {
+        // Compressed files are decompressed as they are read.
+        if let Origin::File(path) = origin
+            && path.is_file()
+            && let Some(format) = compress::format_of(path)
+        {
+            match compress::open(path, format) {
+                Ok(pipe) => {
+                    let naming = Naming {
+                        name: origin.display_name(),
+                        detect: Origin::File(compress::inner_name(path, format)),
+                        path: None,
+                    };
+                    let language = cli.language.as_deref();
+                    files.push(stream_input(cli, settings, &naming, pipe, language));
+                }
+                Err(e) => {
+                    eprintln!(
+                        "mmore: {}: needs the {} command to decompress it ({e})",
+                        path.display(),
+                        format.tool
+                    );
+                    all_ok = false;
+                }
+            }
+            continue;
+        }
         // Pipes are shown while their input is still arriving, when they can be.
         if cli.language.is_none() {
+            let naming = Naming::of(origin);
             match streamable(origin) {
                 Some(Input::Stdin) => {
-                    files.push(stream_input(cli, settings, origin, io::stdin()));
+                    files.push(stream_input(cli, settings, &naming, io::stdin(), None));
                     continue;
                 }
                 Some(Input::File(file)) => {
-                    files.push(stream_input(cli, settings, origin, file));
+                    files.push(stream_input(cli, settings, &naming, file, None));
                     continue;
                 }
                 None => {}
@@ -172,7 +200,12 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
             continue;
         }
 
-        files.push(text_file(cli, &source.origin, source.text(), settings));
+        files.push(text_file(
+            cli,
+            &Naming::of(&source.origin),
+            source.text(),
+            settings,
+        ));
     }
 
     let document = Document {
@@ -188,8 +221,30 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
     (document, all_ok)
 }
 
-fn text_file(cli: &Cli, origin: &Origin, text: String, settings: &Settings) -> File {
-    let kind = content_kind(cli, origin, &text, settings);
+/// What an input is called, what name decides how it is shown, and where it can
+/// be edited. Usually all the same file; a compressed `notes.md.gz` is shown
+/// under its own name, rendered as `notes.md`, and cannot be edited.
+struct Naming {
+    name: String,
+    detect: Origin,
+    path: Option<std::path::PathBuf>,
+}
+
+impl Naming {
+    fn of(origin: &Origin) -> Self {
+        Naming {
+            name: origin.display_name(),
+            detect: origin.clone(),
+            path: match origin {
+                Origin::File(path) => Some(path.clone()),
+                Origin::Stdin => None,
+            },
+        }
+    }
+}
+
+fn text_file(cli: &Cli, naming: &Naming, text: String, settings: &Settings) -> File {
+    let kind = content_kind(cli, &naming.detect, &text, settings);
     // Plain text shows the colors in it (as from `git log --color`); the raw view
     // of Markdown and code shows their source as written.
     let raw = if matches!(kind, Kind::Plain) && !cli.show_escapes {
@@ -205,11 +260,8 @@ fn text_file(cli: &Cli, origin: &Origin, text: String, settings: &Settings) -> F
         }
     };
     File {
-        name: origin.display_name(),
-        path: match origin {
-            Origin::File(path) => Some(path.clone()),
-            Origin::Stdin => None,
-        },
+        name: naming.name.clone(),
+        path: naming.path.clone(),
         raw,
         content,
         stream: None,
@@ -249,10 +301,11 @@ fn streamable(origin: &Origin) -> Option<Input> {
 fn stream_input(
     cli: &Cli,
     settings: &Settings,
-    origin: &Origin,
+    naming: &Naming,
     reader: impl std::io::Read + Send + 'static,
+    language: Option<&str>,
 ) -> File {
-    let name = origin.display_name();
+    let name = naming.name.clone();
     let stream = Stream::spawn(
         reader,
         name.clone(),
@@ -263,11 +316,11 @@ fn stream_input(
     stream.wait_for(1, Some(FIRST_LINE_WAIT));
     if settings.render && !stream.is_binary() {
         let first = stream.line(0).map(|l| l.text()).unwrap_or_default();
-        let kind = detect::detect(assets::syntaxes(), origin, &first, None);
+        let kind = detect::detect(assets::syntaxes(), &naming.detect, &first, language);
         if !matches!(kind, Kind::Plain) {
-            // Highlighting needs the whole input.
+            // Rendering or highlighting needs the whole input.
             let text = stream.take_text().unwrap_or_default();
-            return text_file(cli, origin, text, settings);
+            return text_file(cli, naming, text, settings);
         }
     }
     stream.drop_text();
@@ -331,7 +384,12 @@ fn output(
     let reload = |path: &std::path::Path| -> Option<File> {
         let origin = Origin::File(path.to_path_buf());
         let source = Source::load(origin.clone()).ok()?;
-        Some(text_file(cli, &origin, source.text(), settings))
+        Some(text_file(
+            cli,
+            &Naming::of(&origin),
+            source.text(),
+            settings,
+        ))
     };
     pager::run(
         document,
