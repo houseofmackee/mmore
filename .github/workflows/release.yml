@@ -2,7 +2,8 @@ name: Release
 
 # Builds and publishes a release when a version tag is pushed:
 #   git tag v0.1.0 && git push origin v0.1.0
-# The tag must match the version in Cargo.toml. The full CI (lint, tests, and
+# The tag must match the version in Cargo.toml, and CHANGELOG.md must have a
+# section for it (that section becomes the release notes). The full CI (lint, tests, and
 # terminal checks on Linux and macOS) runs on the tagged commit first; nothing is
 # built or published unless it passes.
 #
@@ -38,6 +39,8 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
             exit 1
           fi
+      - name: Check that CHANGELOG.md has notes for this version
+        run: scripts/release_notes.sh "${GITHUB_REF_NAME#v}"
 
   ci:
     name: CI
@@ -95,6 +98,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -110,11 +114,7 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           notes="$RUNNER_TEMP/notes.md"
-          cat > "$notes" <<NOTES
-          Install with Homebrew (macOS and Linux): \`brew install houseofmackee/tap/mmore\`
-
-          Or download the archive for your platform, check it against \`SHA256SUMS.txt\`, and put \`mmore\` on your PATH. Linux binaries are statically linked and run on any distribution.
-          NOTES
+          scripts/release_notes.sh "$version" > "$notes"
           gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --generate-notes --notes-file "$notes" \
             --title "mmore $version" dist/*.tar.gz dist/SHA256SUMS.txt
 

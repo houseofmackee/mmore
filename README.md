@@ -207,13 +207,15 @@ and macOS for every push to `main` and every pull request
 
 ### Releasing
 
-Set the version in `Cargo.toml`, commit, and push a matching tag:
+Move the `Unreleased` notes in `CHANGELOG.md` into a section for the new version,
+set the version in `Cargo.toml`, commit, and push a matching tag:
 
 ```sh
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-`.github/workflows/release.yml` then runs the full CI on the tagged commit, and only
+`.github/workflows/release.yml` checks that the changelog has a section for the
+version (it becomes the release notes), runs the full CI on the tagged commit, and only
 if it passes builds the four binaries, publishes them with checksums as a GitHub
 release, and updates the formula in
 [houseofmackee/homebrew-tap](https://github.com/houseofmackee/homebrew-tap). The
