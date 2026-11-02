@@ -245,6 +245,17 @@ struct Pager<'a> {
     marks: std::collections::HashMap<char, (usize, usize)>,
     /// Where `''` goes: the place before the last jump.
     last_place: Option<(usize, usize)>,
+    /// While a search is being typed: how things were before, to go back to
+    /// on Esc (search as you type moves the view).
+    search_origin: Option<SearchOrigin>,
+}
+
+/// The state that search as you type changes, saved when the prompt opens.
+struct SearchOrigin {
+    top: usize,
+    hscroll: usize,
+    matches: RowMatches,
+    cursor: Option<(usize, usize)>,
 }
 
 /// What `--watch` compares to notice that a file changed.
@@ -300,6 +311,7 @@ impl<'a> Pager<'a> {
             watched_at: std::time::Instant::now(),
             marks: std::collections::HashMap::new(),
             last_place: None,
+            search_origin: None,
         };
         pager.layout(0);
         pager
@@ -445,11 +457,15 @@ impl<'a> Pager<'a> {
 
         match action {
             Action::Quit => return Flow::Quit,
-            Action::SearchForward => {
-                self.prompt = Some((PromptKind::Search { backward: false }, String::new()));
-            }
-            Action::SearchBackward => {
-                self.prompt = Some((PromptKind::Search { backward: true }, String::new()));
+            Action::SearchForward | Action::SearchBackward => {
+                let backward = action == Action::SearchBackward;
+                self.search_origin = Some(SearchOrigin {
+                    top: self.view.vp.top,
+                    hscroll: self.hscroll,
+                    matches: self.view.matches.clone(),
+                    cursor: self.cursor,
+                });
+                self.prompt = Some((PromptKind::Search { backward }, String::new()));
             }
             Action::Command => self.prompt = Some((PromptKind::Command, String::new())),
             Action::NextMatch => self.next_match(false),
@@ -579,17 +595,32 @@ impl<'a> Pager<'a> {
     fn prompt_key(&mut self, kind: PromptKind, mut input: String, key: KeyEvent) -> Flow {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Esc => {}
-            KeyCode::Char('c' | 'g') if ctrl => {}
-            KeyCode::Char('u') if ctrl => self.prompt = Some((kind, String::new())),
+            KeyCode::Esc => self.cancel_search_preview(),
+            KeyCode::Char('c' | 'g') if ctrl => self.cancel_search_preview(),
+            KeyCode::Char('u') if ctrl => {
+                self.preview_search(kind, "");
+                self.prompt = Some((kind, String::new()));
+            }
             KeyCode::Backspace => {
                 // Backspace on an empty prompt cancels it, as in less.
                 if input.pop().is_some() {
+                    self.preview_search(kind, &input);
                     self.prompt = Some((kind, input));
+                } else {
+                    self.cancel_search_preview();
                 }
             }
             KeyCode::Enter => match kind {
-                PromptKind::Search { backward } => self.start_search(&input, backward),
+                PromptKind::Search { backward } => {
+                    // Search from where the prompt was opened, as without the preview.
+                    if let Some(origin) = self.search_origin.take() {
+                        self.view.vp.top = origin.top;
+                        self.hscroll = origin.hscroll;
+                        self.view.matches = origin.matches;
+                        self.cursor = origin.cursor;
+                    }
+                    self.start_search(&input, backward);
+                }
                 PromptKind::Filter => self.set_filter(&input),
                 PromptKind::Command | PromptKind::Mark { .. } => {}
             },
@@ -599,12 +630,60 @@ impl<'a> Pager<'a> {
                 PromptKind::Mark { set: false } => self.go_to_mark(c),
                 PromptKind::Search { .. } | PromptKind::Filter => {
                     input.push(c);
+                    self.preview_search(kind, &input);
                     self.prompt = Some((kind, input));
                 }
             },
             _ => self.prompt = Some((kind, input)),
         }
         Flow::Continue
+    }
+
+    /// Search as you type: show the first match of `input` from where the search
+    /// prompt was opened, highlighting all matches. An empty or (still) invalid
+    /// pattern shows the original place.
+    fn preview_search(&mut self, kind: PromptKind, input: &str) {
+        let PromptKind::Search { backward } = kind else {
+            return;
+        };
+        let Some(origin) = &self.search_origin else {
+            return;
+        };
+        let (top, hscroll) = (origin.top, origin.hscroll);
+        let search = match Search::new(input, backward) {
+            Ok(search) if !input.is_empty() => search,
+            Ok(_) => {
+                self.view.matches = origin.matches.clone();
+                self.view.vp.top = top;
+                self.hscroll = hscroll;
+                return;
+            }
+            // Probably not finished typing (like "(" before ")"): keep the preview.
+            Err(_) => return,
+        };
+        self.view.matches = search.row_matches(&self.view.wrapped);
+        let found = search::find(&self.view.matches.starts, top, !backward, !backward);
+        let vp = &mut self.view.vp;
+        match found {
+            Some(row) => {
+                vp.top = row.min(vp.max_top());
+                self.reveal_match(row);
+            }
+            None => {
+                vp.top = top;
+                self.hscroll = hscroll;
+            }
+        }
+    }
+
+    /// Leaving the search prompt without searching: back to how things were.
+    fn cancel_search_preview(&mut self) {
+        if let Some(origin) = self.search_origin.take() {
+            self.view.vp.top = origin.top;
+            self.hscroll = origin.hscroll;
+            self.view.matches = origin.matches;
+            self.cursor = origin.cursor;
+        }
     }
 
     /// `:` commands take effect on their first character, as in `more`.
@@ -2149,6 +2228,52 @@ mod tests {
         // The mark prompt shows what it waits for.
         press(&mut p, "m");
         assert!(plain_screen(&p).contains("m"));
+    }
+
+    #[test]
+    fn search_as_you_type_moves_and_esc_goes_back() {
+        let d = doc(&[("a.txt", &numbered(100))]);
+        let mut p = Pager::new(d, &OPTS, 40, 10);
+        press(&mut p, "20g/line 6");
+        assert_eq!(top_text(&p), "line 60");
+        assert!(screen(&p).contains("\x1b[7mline 6\x1b[0m"));
+        press(&mut p, "5");
+        assert_eq!(top_text(&p), "line 65");
+        // Backspace goes back to the earlier match.
+        press(&mut p, "\x08");
+        assert_eq!(top_text(&p), "line 60");
+        // Esc returns to where the search started, without highlights.
+        press(&mut p, "\x1b");
+        assert_eq!(top_text(&p), "line 20");
+        assert!(p.view.matches.ranges.iter().all(Vec::is_empty));
+        assert!(p.search.is_none());
+    }
+
+    #[test]
+    fn enter_commits_the_previewed_search() {
+        let d = doc(&[("a.txt", &numbered(100))]);
+        let mut p = Pager::new(d, &OPTS, 40, 10);
+        press(&mut p, "/line 3\n");
+        assert_eq!(top_text(&p), "line 3");
+        press(&mut p, "n");
+        assert_eq!(top_text(&p), "line 30");
+        // A new search that is cancelled keeps the old one and its highlights.
+        press(&mut p, "/line 9\x1b");
+        assert_eq!(top_text(&p), "line 30");
+        assert_eq!(
+            p.search.as_ref().map(|s| s.pattern.as_str()),
+            Some("line 3")
+        );
+        assert!(screen(&p).contains("\x1b[7mline 3\x1b[0m"));
+        // Not found while typing: stays put.
+        press(&mut p, "/nothing");
+        assert_eq!(top_text(&p), "line 30");
+        // An unfinished pattern keeps the last preview.
+        press(&mut p, "\x1b/line 7(");
+        assert_eq!(top_text(&p), "line 70");
+        // Backward search previews backward.
+        press(&mut p, "\x1b?line 2");
+        assert_eq!(top_text(&p), "line 29");
     }
 
     #[test]

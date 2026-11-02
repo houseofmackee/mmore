@@ -16,6 +16,9 @@ section here, so a version can only be released once it has one.
   `'` and the letter goes back to it, and `''` returns to where you were before
   the last jump (`g`, `G`, `%`, a search, a heading, or a mark).
 
+- Search as you type: while typing after `/` or `?`, the view jumps to the first
+  match and highlights all of them; Enter keeps the search, Esc goes back.
+
 ### Changed
 
 - The switch between the rendered view and the raw source moved from `m` to `r`,

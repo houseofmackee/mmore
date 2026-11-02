@@ -10,6 +10,7 @@ use regex::{Regex, RegexBuilder};
 use crate::style::{Line, Style};
 use crate::wrap::Wrapped;
 
+#[derive(Clone)]
 pub struct Search {
     regex: Regex,
     pub pattern: String,
@@ -18,7 +19,7 @@ pub struct Search {
 }
 
 /// Matches mapped onto wrapped rows.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct RowMatches {
     /// Character ranges to highlight in each row.
     pub ranges: Vec<Vec<Range<usize>>>,

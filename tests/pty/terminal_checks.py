@@ -92,8 +92,8 @@ def run(cmd, keys, rows=10, cols=80, resize=None, env=None):
 
     After each key, output is read until it has been quiet for a moment. A
     snapshot of everything read so far is taken at the start and after each key.
-    "WAIT" pauses (for background work), "PAUSE" waits briefly, and "RESIZE"
-    applies `resize` (rows, cols).
+    "WAIT" pauses (for background work), "PAUSE" waits briefly, "RESIZE"
+    applies `resize` (rows, cols), and a function is called (to change a file).
     """
     pid, fd = spawn(cmd, clean_env(env), rows, cols)
     out = b""
@@ -119,7 +119,10 @@ def run(cmd, keys, rows=10, cols=80, resize=None, env=None):
     drain(3.0)
     snapshots = [out]
     for k in keys:
-        if k == "WAIT":
+        if callable(k):
+            k()
+            drain()
+        elif k == "WAIT":
             time.sleep(1.5)
             drain(0.5)
         elif k == "PAUSE":
@@ -426,6 +429,51 @@ def less_keys(tmp, n100):
     check("the file is reloaded after editing", "added by the editor" in after(snaps, 5) and code == 0)
 
 
+def reading_documents(tmp):
+    doc = os.path.join(tmp, "guide.md")
+    sections = "".join(f"## Part {i}\n\n" + "Some text.\n\n" * 6 for i in range(1, 9))
+    with open(doc, "w") as f:
+        f.write("# Guide\n\n" + sections)
+
+    # ] and [ move between headings; t opens the contents, Enter jumps.
+    out, code, snaps = run(f"{BIN} {doc}", ["]", "]", "[", "t", "j", "j", "\r", "q"], rows=12, cols=40)
+    def top_row(i):
+        return re.sub(r"\x1b\[[0-9;]*m", "", after(snaps, i).split("\x1b[2;1H")[0])
+
+    check("] and [ move between headings", [top_row(i).endswith(t) for i, t in [(0, "Part 1"), (1, "Part 2"), (2, "Part 1")]] == [True] * 3)
+    contents = after(snaps, 3)
+    check("t shows the table of contents", "Contents: j/k" in contents and "Part 8" in contents)
+    check("Enter in the contents jumps to the heading", "Part 3" in after(snaps, 6).split("\x1b[2;1H")[0])
+
+    # --watch reloads when the file changes.
+    log = os.path.join(tmp, "live.txt")
+    with open(log, "w") as f:
+        f.write("first version\n")
+
+    def change():
+        time.sleep(0.3)
+        with open(log, "w") as f:
+            f.write("second version\n")
+
+    out, code, snaps = run(f"{BIN} --watch --always-page {log}", [change, "WAIT", "q"], rows=10, cols=40)
+    check("--watch shows the file after it changes", "second version" in snaps[2][len(snaps[0]):].decode(errors="replace"))
+    check("--watch is shown in the status line", "[watching]" in out)
+
+    # Marks: m sets, ' goes back; '' returns from a jump.
+    n = os.path.join(tmp, "marks.txt")
+    with open(n, "w") as f:
+        f.write("".join(f"{i}\n" for i in range(1, 101)))
+    out, code, snaps = run(f"{BIN} {n}", ["3", "0", "g", "m", "a", "G", "'", "a", "'", "'", "q"], rows=10, cols=40)
+    check("'a goes back to mark a", "\x1b[1;1H\x1b[2K30" in after(snaps, 7))
+    # G shows lines 92 to 100 (9 rows), so that is where '' goes back to.
+    check("'' returns to the place before the jump", "\x1b[1;1H\x1b[2K92" in after(snaps, 9))
+
+    # Search as you type: the view follows the pattern before Enter; Esc goes back.
+    out, code, snaps = run(f"{BIN} {n}", ["/", "7", "5", "\x1b", "q"], rows=10, cols=40)
+    check("search as you type jumps while typing", "\x1b[1;1H\x1b[2K\x1b[7m75" in after(snaps, 2))
+    check("Esc returns to where the search started", "\x1b[1;1H\x1b[2K1" in after(snaps, 3))
+
+
 def input_colors(tmp):
     log = os.path.join(tmp, "colors.log")
     with open(log, "w") as f:
@@ -548,6 +596,7 @@ def main():
         pager_features(n100, links)
         mouse(n100)
         less_keys(tmp, n100)
+        reading_documents(tmp)
         input_colors(tmp)
         streaming()
         suspend(n100)
