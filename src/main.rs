@@ -11,6 +11,7 @@ mod wrap;
 
 use std::io::{self, BufWriter, IsTerminal, Write};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::{CommandFactory, Parser};
 use syntect::highlighting::Theme;
@@ -18,7 +19,7 @@ use syntect::highlighting::Theme;
 use ansi::{ColorMode, When};
 use cli::Cli;
 use detect::Kind;
-use document::{Document, File, Section};
+use document::{Document, File, LazyHighlight, Section};
 use render::Rendered;
 use source::{Origin, Source};
 use style::Line;
@@ -170,8 +171,8 @@ fn section(cli: &Cli, origin: &Origin, text: String, settings: &Settings) -> Sec
     );
     match kind {
         Kind::Markdown => Section::Markdown(text),
-        Kind::Code(syntax) if settings.highlight && render::code::should_highlight(&text) => {
-            Section::Fixed(render::code::render(&text, syntax, settings.theme))
+        Kind::Code(syntax) if settings.highlight => {
+            Section::Code(Arc::new(LazyHighlight::new(text, syntax, settings.theme)))
         }
         Kind::Code(_) | Kind::Plain => Section::Plain,
     }
@@ -190,10 +191,10 @@ fn output(
         let width = size.map_or(DEFAULT_WIDTH, |(cols, _)| cols as usize);
         return dump(&document.render_all(width), color, hyperlinks);
     };
-    let rendered = document.render_all(cols as usize);
     // Leave a row free so the shell prompt does not push the first line off screen.
-    if !cli.always_page && wrap::row_count(&rendered.lines, cols as usize) < rows as usize {
-        return dump(&rendered, color, hyperlinks);
+    // Counting rows needs no highlighting, so big files go straight to the pager.
+    if !cli.always_page && document.fits(cols as usize, rows as usize) {
+        return dump(&document.render_all(cols as usize), color, hyperlinks);
     }
     pager::run(
         document,

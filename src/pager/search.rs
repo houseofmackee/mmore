@@ -7,7 +7,6 @@ use std::ops::Range;
 
 use regex::{Regex, RegexBuilder};
 
-use crate::render::Rendered;
 use crate::style::{Line, Style};
 use crate::wrap::Wrapped;
 
@@ -67,12 +66,20 @@ impl Search {
         ranges
     }
 
-    pub fn row_matches(&self, rendered: &Rendered, wrapped: &Wrapped) -> RowMatches {
-        let per_line: Vec<Vec<Range<usize>>> = rendered
-            .lines
-            .iter()
-            .map(|l| self.line_matches(&l.text()))
-            .collect();
+    pub fn row_matches(&self, wrapped: &Wrapped) -> RowMatches {
+        // Rebuild each rendered line's text from its rows (wrapping keeps every
+        // character), then match on whole lines.
+        let mut per_line: Vec<Vec<Range<usize>>> = Vec::new();
+        let mut text = String::new();
+        for (row, line) in wrapped.rows.iter().enumerate() {
+            text.push_str(&line.text());
+            let last = wrapped.line.get(row + 1) != Some(&wrapped.line[row]);
+            if last {
+                per_line.push(self.line_matches(&text));
+                text.clear();
+            }
+        }
+        // Rendered lines are numbered from 0 in row order, so `per_line` lines up.
         let mut result = RowMatches::default();
         for (row, line) in wrapped.rows.iter().enumerate() {
             let matches = &per_line[wrapped.line[row]];
@@ -136,6 +143,8 @@ mod tests {
     use super::*;
     use crate::wrap::wrap_all;
 
+    use crate::render::Rendered;
+
     fn rendered(lines: &[&str]) -> Rendered {
         let mut r = Rendered::default();
         for (i, l) in lines.iter().enumerate() {
@@ -177,9 +186,8 @@ mod tests {
 
     #[test]
     fn matches_split_across_wrapped_rows() {
-        let r = rendered(&["abcdef", "xx"]);
-        let w = wrap_all(&r, 4);
-        let m = Search::new("cde", false).unwrap().row_matches(&r, &w);
+        let w = wrap_all(rendered(&["abcdef", "xx"]), 4);
+        let m = Search::new("cde", false).unwrap().row_matches(&w);
         assert_eq!(m.ranges, vec![vec![2..4], vec![0..1], vec![]]);
         assert_eq!(m.starts, vec![true, false, false]);
     }

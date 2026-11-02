@@ -11,6 +11,7 @@ mod search;
 mod viewport;
 
 use std::io::{self, BufWriter, Write};
+use std::time::Duration;
 
 use crossterm::cursor::{self, MoveTo};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -20,10 +21,10 @@ use crossterm::terminal::{self, Clear, ClearType};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ansi::{self, ColorMode};
-use crate::document::{Document, gutter_span};
+use crate::document::{Document, LazyHighlight, gutter_span};
 use crate::render::Rendered;
 use crate::style::Line;
-use crate::wrap::{Wrapped, wrap_all};
+use crate::wrap::{Wrapped, wrap_all, wrap_line};
 use keys::Action;
 use screen::Screen;
 use search::{RowMatches, Search};
@@ -42,28 +43,57 @@ pub fn run(document: &Document, opts: &Options) -> io::Result<()> {
     if document.files.is_empty() {
         return Ok(());
     }
+    document.start_highlighting();
     let _screen = Screen::enter()?;
     let mut out = BufWriter::new(io::stdout());
     let (cols, rows) = terminal::size()?;
     let mut pager = Pager::new(document, opts, cols, rows);
+    pager.wait_for_first_screen(FIRST_SCREEN_WAIT);
+    let mut dirty = true;
+    // Highlighted lines available at the last draw.
+    let mut drawn = 0;
     loop {
-        pager.draw(&mut out)?;
-        match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
+        if dirty {
+            pager.draw(&mut out)?;
+            drawn = pager.highlight_progress();
+            dirty = false;
+        }
+        // Highlighting may have finished since the last draw: show it before waiting.
+        if !pager.highlighting() && pager.newly_highlighted_on_screen(drawn) {
+            dirty = true;
+            continue;
+        }
+        // While highlighting runs, wake up now and then to show its progress.
+        let event = if pager.highlighting() {
+            event::poll(HIGHLIGHT_POLL)?.then(event::read).transpose()?
+        } else {
+            Some(event::read()?)
+        };
+        match event {
+            None => dirty = pager.newly_highlighted_on_screen(drawn),
+            Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                 if pager.key(key) == Flow::Quit {
                     break;
                 }
+                dirty = true;
             }
-            Event::Resize(..) => {
+            Some(Event::Resize(..)) => {
                 // Query again: the size in the event can be stale during a drag.
                 let (cols, rows) = terminal::size()?;
                 pager.resize(cols, rows);
+                dirty = true;
             }
-            _ => {}
+            Some(_) => {}
         }
     }
     Ok(())
 }
+
+/// How long to wait for the first screen to be highlighted before showing it
+/// plain. Small files are done by then; big files do not keep you waiting.
+const FIRST_SCREEN_WAIT: Duration = Duration::from_millis(50);
+/// How often to check for newly highlighted lines while highlighting runs.
+const HIGHLIGHT_POLL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, PartialEq, Eq)]
 enum Flow {
@@ -79,11 +109,12 @@ enum PromptKind {
 
 /// One laid-out screenful source: rows plus scroll position.
 struct View {
-    rendered: Rendered,
     wrapped: Wrapped,
     vp: Viewport,
     /// Width of the line number gutter (0 when off).
     gutter: usize,
+    /// Width the content was wrapped at.
+    width: usize,
     matches: RowMatches,
 }
 
@@ -143,20 +174,20 @@ impl<'a> Pager<'a> {
         let gutter = self.doc.gutter_width(self.file);
         let width = (self.cols as usize).saturating_sub(gutter).max(1);
         let rendered = self.doc.render_file(self.file, width, self.raw);
-        let wrapped = wrap_all(&rendered, width);
+        let wrapped = wrap_all(rendered, width);
         let matches = self
             .search
             .as_ref()
-            .map(|s| s.row_matches(&rendered, &wrapped))
+            .map(|s| s.row_matches(&wrapped))
             .unwrap_or_default();
         let mut vp = Viewport::new(wrapped.rows.len(), self.content_height());
         let top = wrapped.first_row_of(anchor);
         vp.reset(wrapped.rows.len(), self.content_height(), top);
         self.view = View {
-            rendered,
             wrapped,
             vp,
             gutter,
+            width,
             matches,
         };
         self.cursor = None;
@@ -167,13 +198,13 @@ impl<'a> Pager<'a> {
         for (i, line) in help::lines().into_iter().enumerate() {
             rendered.push(line, i);
         }
-        let wrapped = wrap_all(&rendered, self.cols as usize);
+        let wrapped = wrap_all(rendered, self.cols as usize);
         let vp = Viewport::new(wrapped.rows.len(), self.content_height());
         self.help = Some(View {
-            rendered,
             wrapped,
             vp,
             gutter: 0,
+            width: self.cols as usize,
             matches: RowMatches::default(),
         });
     }
@@ -315,7 +346,7 @@ impl<'a> Pager<'a> {
         };
         match Search::new(&pattern, backward) {
             Ok(search) => {
-                self.view.matches = search.row_matches(&self.view.rendered, &self.view.wrapped);
+                self.view.matches = search.row_matches(&self.view.wrapped);
                 self.search = Some(search);
                 self.cursor = None;
                 self.jump(!backward, true);
@@ -348,6 +379,79 @@ impl<'a> Pager<'a> {
             }
             None => self.message = Some("Pattern not found".into()),
         }
+    }
+
+    /// The current file's lazy highlighter, when highlighted lines can be shown.
+    fn lazy(&self) -> Option<&LazyHighlight> {
+        if self.raw || self.help.is_some() {
+            return None;
+        }
+        self.doc.code(self.file)
+    }
+
+    /// Wait (up to `limit`) until the lines on screen are highlighted.
+    fn wait_for_first_screen(&self, limit: Duration) {
+        let deadline = std::time::Instant::now() + limit;
+        let wrapped = &self.view.wrapped;
+        let bottom = (self.view.vp.top + self.view.vp.height).min(wrapped.rows.len());
+        let last_line = wrapped
+            .line
+            .get(bottom.saturating_sub(1))
+            .copied()
+            .unwrap_or(0);
+        while self.highlighting()
+            && self.highlight_progress() <= last_line
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Whether the current file is still being highlighted.
+    fn highlighting(&self) -> bool {
+        self.lazy().is_some_and(|lazy| !lazy.is_done())
+    }
+
+    fn highlight_progress(&self) -> usize {
+        self.lazy().map_or(0, LazyHighlight::progress)
+    }
+
+    /// Whether lines that were plain at the last draw (when `drawn` lines were
+    /// highlighted) are on screen and now have their highlighted version.
+    fn newly_highlighted_on_screen(&self, drawn: usize) -> bool {
+        let wrapped = &self.view.wrapped;
+        let vp = &self.view.vp;
+        let Some(&last_line) = wrapped.line.get(
+            (vp.top + vp.height)
+                .min(wrapped.rows.len())
+                .saturating_sub(1),
+        ) else {
+            return false;
+        };
+        drawn <= last_line && self.highlight_progress() > drawn
+    }
+
+    /// Row `r` of the current view, highlighted if its line is ready. Highlighting
+    /// does not change the text, so the highlighted line wraps into the same rows.
+    fn row(&self, view: &View, r: usize) -> Line {
+        let row = &view.wrapped.rows[r];
+        let Some(lazy) = self.lazy() else {
+            return row.clone();
+        };
+        let index = view.wrapped.line[r];
+        let Some(highlighted) = lazy.line(index) else {
+            return row.clone();
+        };
+        // Which of this line's rows `r` is.
+        let first = (0..=r)
+            .rev()
+            .take_while(|&i| view.wrapped.line[i] == index)
+            .last()
+            .unwrap_or(r);
+        wrap_line(&highlighted, view.width)
+            .into_iter()
+            .nth(r - first)
+            .unwrap_or_else(|| row.clone())
     }
 
     /// "name (file 2 of 3), line 12 of 300", for `=` and `:f`.
@@ -409,7 +513,10 @@ impl<'a> Pager<'a> {
             // Clear before printing: clearing after a full-width row would erase its last cell.
             queue!(out, MoveTo(0, i as u16), Clear(ClearType::CurrentLine))?;
             let r = view.vp.top + i;
-            let Some(row) = rows.get(r) else { continue };
+            if r >= rows.len() {
+                continue;
+            }
+            let row = self.row(view, r);
             let mut line = Line::default();
             if view.gutter > 0 {
                 let source = view.wrapped.source[r];
@@ -418,7 +525,7 @@ impl<'a> Pager<'a> {
                     .push(gutter_span(first.then_some(source + 1), view.gutter));
             }
             let ranges = view.matches.ranges.get(r).map_or(&[][..], Vec::as_slice);
-            line.append(search::highlight(row, ranges));
+            line.append(search::highlight(&row, ranges));
             queue!(out, Print(ansi::render(&line, mode, links)))?;
         }
 
@@ -457,10 +564,10 @@ impl<'a> Pager<'a> {
 
 fn empty_view() -> View {
     View {
-        rendered: Rendered::default(),
         wrapped: Wrapped::default(),
         vp: Viewport::new(0, 1),
         gutter: 0,
+        width: 1,
         matches: RowMatches::default(),
     }
 }
@@ -769,6 +876,42 @@ mod tests {
         press(&mut p, "/line 30\n");
         p.resize(40, 20);
         assert!(screen(&p).contains("\x1b[7mline 30\x1b[0m"));
+    }
+
+    #[test]
+    fn code_is_highlighted_on_screen_once_ready() {
+        use crate::document::LazyHighlight;
+        use std::sync::Arc;
+        let text = "fn main() {\n    let wrapped_long_identifier_name = 1;\n}\n";
+        let syntax = assets::syntaxes().find_syntax_by_extension("rs").unwrap();
+        let theme = assets::theme(assets::DEFAULT_DARK_THEME).unwrap();
+        let lazy = Arc::new(LazyHighlight::new(text.into(), syntax, theme));
+        let mut d = doc(&[]);
+        d.files.push(File {
+            name: "a.rs".into(),
+            content: Section::Code(Arc::clone(&lazy)),
+            raw: plain::render(text),
+        });
+        let opts = Options {
+            color: ColorMode::TrueColor,
+            ..OPTS
+        };
+        let p = Pager::new(&d, &opts, 20, 10);
+        assert!(p.highlighting());
+        assert!(!screen(&p).contains("38;2;"));
+        assert!(!p.newly_highlighted_on_screen(0));
+        lazy.run();
+        assert!(p.newly_highlighted_on_screen(0));
+        assert!(!p.highlighting());
+        let s = screen(&p);
+        assert!(s.contains("38;2;"));
+        // The wrapped second line keeps its text across rows.
+        assert!(plain_screen(&p).contains("    let wrapped_long"));
+        assert!(plain_screen(&p).contains("_identifier_name = 1"));
+        // The raw view shows no highlighting.
+        let mut p = p;
+        press(&mut p, "m");
+        assert!(!screen(&p).contains("38;2;"));
     }
 
     #[test]

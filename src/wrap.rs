@@ -27,14 +27,26 @@ impl Wrapped {
     }
 }
 
-pub fn wrap_all(rendered: &Rendered, width: usize) -> Wrapped {
+/// Wrap every line. Takes the rendered lines by value so lines that fit are
+/// moved rather than copied (large files have hundreds of thousands).
+pub fn wrap_all(rendered: Rendered, width: usize) -> Wrapped {
+    let width = width.max(1);
+    let count = rendered.lines.len();
     let mut wrapped = Wrapped {
-        links: rendered.links.clone(),
-        ..Wrapped::default()
+        links: rendered.links,
+        rows: Vec::with_capacity(count),
+        source: Vec::with_capacity(count),
+        line: Vec::with_capacity(count),
+        offset: Vec::with_capacity(count),
     };
-    for (index, (line, &source)) in rendered.lines.iter().zip(&rendered.source).enumerate() {
+    for (index, (line, source)) in rendered.lines.into_iter().zip(rendered.source).enumerate() {
+        let rows = if line.width() <= width {
+            vec![line]
+        } else {
+            wrap_line(&line, width)
+        };
         let mut offset = 0;
-        for row in wrap_line(line, width) {
+        for row in rows {
             let chars = row
                 .spans
                 .iter()
@@ -50,7 +62,26 @@ pub fn wrap_all(rendered: &Rendered, width: usize) -> Wrapped {
     wrapped
 }
 
+/// Whether `lines` fit in fewer than `max_rows` rows at `width`. Stops counting as
+/// soon as they do not.
+pub fn fits(lines: &[Line], width: usize, max_rows: usize) -> bool {
+    let width = width.max(1);
+    let mut rows = 0;
+    for line in lines {
+        rows += if line.width() <= width {
+            1
+        } else {
+            wrap_line(line, width).len()
+        };
+        if rows >= max_rows {
+            return false;
+        }
+    }
+    true
+}
+
 /// Number of terminal rows `lines` occupy at `width`.
+#[cfg(test)]
 pub fn row_count(lines: &[Line], width: usize) -> usize {
     let width = width.max(1);
     lines
@@ -237,7 +268,8 @@ mod tests {
         r.push(Line::plain("abcd"), 0);
         r.push(Line::plain("x"), 3);
         r.push(Line::plain("123456"), 4);
-        let w = wrap_all(&r, 2);
+        let counted = row_count(&r.lines, 2);
+        let w = wrap_all(r, 2);
         assert_eq!(texts(&w.rows), vec!["ab", "cd", "x", "12", "34", "56"]);
         assert_eq!(w.source, vec![0, 0, 3, 4, 4, 4]);
         assert_eq!(w.line, vec![0, 0, 1, 2, 2, 2]);
@@ -245,7 +277,9 @@ mod tests {
         assert_eq!(w.first_row_of(3), 2);
         // A source line with no rows of its own anchors to the next one.
         assert_eq!(w.first_row_of(1), 2);
-        assert_eq!(row_count(&r.lines, 2), 6);
+        assert_eq!(counted, 6);
+        assert!(!fits(&[Line::plain("abcd")], 2, 2));
+        assert!(fits(&[Line::plain("abcd")], 2, 3));
     }
 
     #[test]

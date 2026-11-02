@@ -4,21 +4,117 @@
 //! width, so it is laid out again whenever the terminal is resized. Every file also
 //! keeps its plain source lines for the raw view.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
+use std::thread;
+use std::time::{Duration, Instant};
+
 use syntect::highlighting::Theme;
+use syntect::parsing::SyntaxReference;
 use unicode_width::UnicodeWidthStr;
 
 use crate::render::Rendered;
+use crate::render::code;
 use crate::render::markdown::{self, MdOptions};
 use crate::style::{Line, Span, Style};
+use crate::wrap;
 
 /// How a file is displayed when not in the raw view.
 pub enum Section {
     /// Same as the raw source lines.
     Plain,
-    /// Pre-rendered lines (highlighted code, or a message for binary files).
-    Fixed(Vec<Line>),
     /// Markdown source, laid out at render time.
     Markdown(String),
+    /// Source code, highlighted lazily (see `LazyHighlight`).
+    Code(Arc<LazyHighlight>),
+}
+
+/// Syntax highlighting that runs in the background, so large files open at once.
+/// Highlighting must go from the top (the parser state carries over), so lines
+/// become available in order; until then they are shown plain.
+pub struct LazyHighlight {
+    syntax: &'static SyntaxReference,
+    theme: &'static Theme,
+    text: String,
+    lines: RwLock<Vec<Line>>,
+    started: AtomicBool,
+    done: AtomicBool,
+}
+
+/// Highlighted lines are published in batches of this many, or after this long,
+/// whichever comes first, so the first screen gets its colors quickly.
+const BATCH: usize = 256;
+const BATCH_TIME: Duration = Duration::from_millis(20);
+
+impl LazyHighlight {
+    pub fn new(text: String, syntax: &'static SyntaxReference, theme: &'static Theme) -> Self {
+        LazyHighlight {
+            syntax,
+            theme,
+            text,
+            lines: RwLock::new(Vec::new()),
+            started: AtomicBool::new(false),
+            done: AtomicBool::new(false),
+        }
+    }
+
+    /// Highlight everything, publishing lines as it goes. Runs only once.
+    pub fn run(&self) {
+        if self.started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let mut batch = Vec::with_capacity(BATCH);
+        let mut last = Instant::now();
+        code::highlight_lines(&self.text, self.syntax, self.theme, |line| {
+            batch.push(line);
+            if batch.len() >= BATCH || last.elapsed() >= BATCH_TIME {
+                self.publish(&mut batch);
+                last = Instant::now();
+            }
+            true
+        });
+        self.publish(&mut batch);
+        self.done.store(true, Ordering::Release);
+    }
+
+    fn publish(&self, batch: &mut Vec<Line>) {
+        let mut lines = self.lines.write().unwrap_or_else(PoisonError::into_inner);
+        lines.append(batch);
+    }
+
+    /// Number of lines highlighted so far.
+    pub fn progress(&self) -> usize {
+        self.lines
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+
+    /// The highlighted version of line `index`, if it is ready.
+    pub fn line(&self, index: usize) -> Option<Line> {
+        let lines = self.lines.read().unwrap_or_else(PoisonError::into_inner);
+        lines.get(index).cloned()
+    }
+
+    /// All lines, highlighting synchronously if the background work is not done.
+    pub fn all(&self) -> Vec<Line> {
+        if self.is_done() {
+            let highlighted = self.lines.read().unwrap_or_else(PoisonError::into_inner);
+            // Lines after a point the highlighter gave up on stay plain.
+            let mut lines = highlighted.clone();
+            lines.extend(
+                crate::render::plain::render(&self.text)
+                    .into_iter()
+                    .skip(highlighted.len()),
+            );
+            return lines;
+        }
+        code::render(&self.text, self.syntax, self.theme)
+    }
 }
 
 pub struct File {
@@ -62,9 +158,65 @@ impl Document {
                 };
                 markdown::render(text, &opts)
             }
-            Section::Fixed(lines) if !raw => fixed(lines),
-            _ => fixed(&file.raw),
+            // Code starts plain; the pager shows highlighted lines as they arrive.
+            Section::Markdown(_) | Section::Plain | Section::Code(_) => fixed(&file.raw),
         }
+    }
+
+    /// The lazy highlighter of a code file.
+    pub fn code(&self, index: usize) -> Option<&LazyHighlight> {
+        match &self.files[index].content {
+            Section::Code(lazy) => Some(lazy),
+            _ => None,
+        }
+    }
+
+    /// Start highlighting every code file in the background.
+    pub fn start_highlighting(&self) {
+        for file in &self.files {
+            if let Section::Code(lazy) = &file.content {
+                let lazy = Arc::clone(lazy);
+                thread::spawn(move || lazy.run());
+            }
+        }
+    }
+
+    /// Whether `render_all` at `width` would take fewer than `max_rows` rows. Needs
+    /// no highlighting and stops early, so large files are rejected quickly.
+    pub fn fits(&self, width: usize, max_rows: usize) -> bool {
+        let mut lines = Vec::new();
+        for (i, file) in self.files.iter().enumerate() {
+            if self.files.len() > 1 {
+                let bar = Line::plain(":".repeat(14));
+                lines.extend([bar.clone(), Line::plain(&file.name), bar]);
+            }
+            let gutter = self.gutter_width(i);
+            let inner = width.saturating_sub(gutter).max(1);
+            // Every line takes at least one row: skip the work for big files.
+            if lines.len() + file.raw.len() >= max_rows {
+                return false;
+            }
+            match &file.content {
+                Section::Markdown(_) => {
+                    for line in self.render_file(i, inner, false).lines {
+                        let mut row = Line::plain(" ".repeat(gutter));
+                        row.append(line);
+                        lines.push(row);
+                    }
+                }
+                _ => {
+                    for line in &file.raw {
+                        let mut row = Line::plain(" ".repeat(gutter));
+                        row.append(line.clone());
+                        lines.push(row);
+                    }
+                }
+            }
+            if !wrap::fits(&lines, width, max_rows) {
+                return false;
+            }
+        }
+        wrap::fits(&lines, width, max_rows)
     }
 
     /// Render every file one after the other, for printing without the pager.
@@ -80,7 +232,11 @@ impl Document {
                 }
             }
             let gutter = self.gutter_width(index);
-            let rendered = self.render_file(index, width.saturating_sub(gutter).max(1), false);
+            let rendered = match &self.files[index].content {
+                // Printing needs every line highlighted now.
+                Section::Code(lazy) => fixed(&lazy.all()),
+                _ => self.render_file(index, width.saturating_sub(gutter).max(1), false),
+            };
             // Link indexes are per file; shift them into the shared table.
             let link_base = out.links.len() as u32;
             out.links.extend(rendered.links);
@@ -246,6 +402,56 @@ mod tests {
                 "    para"
             ]
         );
+    }
+
+    fn code_file(text: &str) -> File {
+        let syntax = assets::syntaxes().find_syntax_by_extension("rs").unwrap();
+        let theme = assets::theme(assets::DEFAULT_DARK_THEME).unwrap();
+        file(
+            "a.rs",
+            Section::Code(Arc::new(LazyHighlight::new(text.into(), syntax, theme))),
+            text,
+        )
+    }
+
+    #[test]
+    fn code_is_plain_until_highlighted() {
+        let d = doc(vec![code_file("fn main() {}\nlet x = 1;\n")]);
+        let lazy = d.code(0).unwrap();
+        assert_eq!(lazy.progress(), 0);
+        assert!(lazy.line(0).is_none());
+        let r = d.render_file(0, 40, false);
+        assert!(r.lines[0].spans.iter().all(|s| s.style.fg.is_none()));
+        lazy.run();
+        assert!(lazy.is_done());
+        assert_eq!(lazy.progress(), 2);
+        let line = lazy.line(0).unwrap();
+        assert_eq!(line.text(), "fn main() {}");
+        assert!(line.spans.iter().any(|s| s.style.fg.is_some()));
+    }
+
+    #[test]
+    fn printing_highlights_code_synchronously() {
+        let d = doc(vec![code_file("fn main() {}\n")]);
+        let r = d.render_all(40);
+        assert!(r.lines[0].spans.iter().any(|s| s.style.fg.is_some()));
+    }
+
+    #[test]
+    fn fits_agrees_with_render_all() {
+        let mut d = doc(vec![
+            code_file("fn main() {}\n"),
+            markdown("b.md", "# H\n\ntext"),
+            file("c.txt", Section::Plain, "a long line that wraps around"),
+        ]);
+        for numbers in [false, true] {
+            d.line_numbers = numbers;
+            for width in [10, 12, 40] {
+                let rows = wrap::row_count(&d.render_all(width).lines, width);
+                assert!(d.fits(width, rows + 1), "width {width}, numbers {numbers}");
+                assert!(!d.fits(width, rows), "width {width}, numbers {numbers}");
+            }
+        }
     }
 
     #[test]

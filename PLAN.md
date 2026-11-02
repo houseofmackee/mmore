@@ -134,19 +134,21 @@ Walk the `pulldown-cmark` event stream with a style stack and a block-context st
 
 ## 6. Syntax highlighting
 
-- Use syntect's bundled `SyntaxSet::load_defaults_newlines()` (covers Rust, Python, JS,
-  TS via JS syntax, Go, C, C++, Java, C#, Ruby, PHP, shell, SQL, HTML, CSS, JSON, YAML,
-  TOML, Markdown, Makefile, Dockerfile, and more).
-- Optionally add a few extra `.sublime-syntax` files (TypeScript, TOML, Dockerfile if
-  missing) compiled into a binary dump at build time via `build.rs`, so startup does not
-  pay for parsing. Defer this until v1 works. Meanwhile, missing languages map to the
-  closest bundled one (TypeScript to JavaScript, TOML to Java Properties, Kotlin to Java).
+- Start from syntect's built-in syntaxes (Rust, Python, JavaScript, Go, C, C++, Java,
+  C#, Ruby, PHP, shell, SQL, HTML, CSS, JSON, YAML, Markdown, Makefile, and more).
+- Add extra `.sublime-syntax` files from `assets/syntaxes` (TypeScript and TOML so far,
+  with their sources and licenses recorded there). `build.rs` merges them with the
+  built-in set into an uncompressed bundle embedded in the binary, which loads in under
+  1 ms. A few languages without a grammar map to a close one (Kotlin to Java).
 - Themes: default `base16-ocean.dark`; detect light backgrounds through `COLORFGBG` or an
   OSC 11 query (best effort, with timeout) and pick a light theme. `--theme NAME` and
   `--list-themes` flags.
-- Highlight lazily for large files: highlight from the top up to the current viewport plus
-  a margin, since syntect state must be carried forward line by line. Until then (milestone 7),
-  inputs over 256 KiB or with lines over 20,000 bytes are shown as plain text.
+- Highlight lazily: a background thread highlights each code file from the top (syntect
+  state must be carried forward line by line) and publishes lines in batches. The pager
+  shows lines plain until their highlighted version is ready, then swaps it in at draw
+  time; highlighting never changes the text, so wrapping and scrolling are unaffected.
+  The first screen waits up to 50 ms so small files open already colored. Highlighting
+  stops at a line over 20,000 bytes (minified code); the rest stays plain.
 - Map syntect colors to our `Style`, then downgrade color depth according to
   `COLORTERM` / `TERM`.
 
