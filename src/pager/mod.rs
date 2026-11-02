@@ -48,6 +48,8 @@ pub struct Options<'a> {
     pub mouse: bool,
     /// Start with long lines cut off instead of wrapped (`-S`).
     pub chop: bool,
+    /// Reload the current file when it changes on disk (`--watch`).
+    pub watch: bool,
     /// How to load a file again after editing it.
     pub reload: Option<Reload<'a>>,
 }
@@ -88,16 +90,20 @@ pub fn run(document: Document, opts: &Options) -> io::Result<()> {
             dirty = true;
             continue;
         }
-        // While highlighting runs or input arrives, wake up now and then.
-        let event = if pager.highlighting() || pager.reading() {
-            event::poll(HIGHLIGHT_POLL)?.then(event::read).transpose()?
+        // While highlighting runs, input arrives, or a file is watched, wake up
+        // now and then.
+        let busy = pager.highlighting() || pager.reading();
+        let event = if busy || opts.watch {
+            let wait = if busy { HIGHLIGHT_POLL } else { WATCH_POLL };
+            event::poll(wait)?.then(event::read).transpose()?
         } else {
             Some(event::read()?)
         };
         match event {
             None => {
                 let highlighted = pager.newly_highlighted_on_screen(drawn);
-                dirty = pager.pull_stream() || highlighted;
+                let changed = pager.check_watched();
+                dirty = pager.pull_stream() || highlighted || changed;
             }
             Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                 match pager.key(key) {
@@ -149,6 +155,8 @@ const FIRST_SCREEN_WAIT: Duration = Duration::from_millis(50);
 const WHEEL_ROWS: isize = 3;
 /// How often to check for newly highlighted lines while highlighting runs.
 const HIGHLIGHT_POLL: Duration = Duration::from_millis(25);
+/// How often `--watch` looks at the file.
+const WATCH_POLL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, PartialEq, Eq)]
 enum Flow {
@@ -223,6 +231,18 @@ struct Pager<'a> {
     heading_cursor: Option<(usize, usize)>,
     /// The table of contents, while it is open.
     toc: Option<Toc>,
+    /// Modification time and size of each file when last loaded, for `--watch`.
+    stamps: Vec<Option<Stamp>>,
+    /// When `--watch` last looked at the file.
+    watched_at: std::time::Instant,
+}
+
+/// What `--watch` compares to notice that a file changed.
+type Stamp = (std::time::SystemTime, u64);
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 /// Table of contents state: the selected heading and the first one shown.
@@ -234,6 +254,16 @@ struct Toc {
 impl<'a> Pager<'a> {
     fn new(doc: Document, opts: &'a Options<'a>, cols: u16, rows: u16) -> Self {
         let files = doc.files.len();
+        let stamps = doc
+            .files
+            .iter()
+            .map(|f| {
+                f.path
+                    .as_deref()
+                    .filter(|_| f.stream.is_none())
+                    .and_then(stamp)
+            })
+            .collect();
         let mut pager = Pager {
             doc,
             opts,
@@ -256,6 +286,8 @@ impl<'a> Pager<'a> {
             filter: None,
             heading_cursor: None,
             toc: None,
+            stamps,
+            watched_at: std::time::Instant::now(),
         };
         pager.layout(0);
         pager
@@ -469,6 +501,17 @@ impl<'a> Pager<'a> {
             Action::NextHeading => self.next_heading(true),
             Action::PrevHeading => self.next_heading(false),
             Action::Contents => self.open_contents(),
+            Action::Reload => {
+                let file = &self.doc.files[self.file];
+                if file.path.is_some() && file.stream.is_none() {
+                    self.reload();
+                    if self.message.is_none() {
+                        self.message = Some(format!("Reloaded {}", self.doc.files[self.file].name));
+                    }
+                } else {
+                    self.message = Some(format!("{} cannot be reloaded", file.name));
+                }
+            }
             Action::None | Action::Digit(_) | Action::Percent => {}
             movement => {
                 if self.view.vp.at_end() && movement.moves_forward() {
@@ -690,7 +733,27 @@ impl<'a> Pager<'a> {
         }
     }
 
-    /// Load the current file again (after editing), keeping the place.
+    /// `--watch`: reload the current file if it changed on disk since it was
+    /// loaded. Looks at most every `WATCH_POLL`. Returns whether it reloaded.
+    fn check_watched(&mut self) -> bool {
+        if !self.opts.watch || self.watched_at.elapsed() < WATCH_POLL {
+            return false;
+        }
+        self.watched_at = std::time::Instant::now();
+        let file = &self.doc.files[self.file];
+        let Some(path) = file.path.as_deref().filter(|_| file.stream.is_none()) else {
+            return false;
+        };
+        let now = stamp(path);
+        if now.is_none() || now == self.stamps[self.file] {
+            return false;
+        }
+        self.reload();
+        true
+    }
+
+    /// Load the current file again (after editing, `R`, or `--watch`), keeping the
+    /// place; at the end it stays at the end, so a growing log keeps showing it.
     fn reload(&mut self) {
         let Some(reload) = self.opts.reload else {
             return;
@@ -698,12 +761,17 @@ impl<'a> Pager<'a> {
         let Some(path) = self.doc.files[self.file].path.clone() else {
             return;
         };
+        self.stamps[self.file] = stamp(&path);
         match reload(&path) {
             Some(file) => {
+                let at_end = self.view.vp.at_end() && self.view.vp.top > 0;
                 self.doc.files[self.file] = file;
                 self.doc.start_highlighting_file(self.file);
                 let anchor = self.view.anchor();
                 self.layout(anchor);
+                if at_end {
+                    self.view.vp.top = self.view.vp.max_top();
+                }
             }
             None => {
                 self.message = Some(format!("Could not read {} again", path.display()));
@@ -970,6 +1038,9 @@ impl<'a> Pager<'a> {
         if self.chop && self.hscroll > 0 {
             status.push_str(&format!("  [from column {}]", self.hscroll + 1));
         }
+        if self.opts.watch {
+            status.push_str("  [watching]");
+        }
         status
     }
 
@@ -1194,6 +1265,7 @@ mod tests {
         hyperlinks: false,
         mouse: false,
         chop: false,
+        watch: false,
         reload: None,
     };
 
@@ -1884,6 +1956,87 @@ mod tests {
         press(&mut p, "t");
         assert_eq!(press(&mut p, "q"), Flow::Continue);
         assert!(p.toc.is_none());
+    }
+
+    /// A file on disk, and a reload function that reads it as plain text.
+    fn on_disk(name: &str, text: &str) -> (std::path::PathBuf, Document) {
+        let dir = std::env::temp_dir().join(format!("mmore-watch-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        let mut d = doc(&[(name, text)]);
+        d.files[0].path = Some(path.clone());
+        (path, d)
+    }
+
+    fn read_plain(path: &Path) -> Option<File> {
+        let text = std::fs::read_to_string(path).ok()?;
+        Some(File {
+            name: path.display().to_string(),
+            path: Some(path.to_path_buf()),
+            content: Section::Plain,
+            raw: plain::render(&text),
+            stream: None,
+        })
+    }
+
+    /// Change a file's content and push its modification time forward, so the
+    /// change is noticed even on file systems with coarse timestamps.
+    fn rewrite(path: &Path, text: &str) {
+        std::fs::write(path, text).unwrap();
+        let later = std::time::SystemTime::now() + Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+    }
+
+    #[test]
+    fn watch_reloads_when_the_file_changes() {
+        let (path, d) = on_disk("doc.txt", &numbered(30));
+        let reload = read_plain;
+        let opts = Options {
+            watch: true,
+            reload: Some(&reload),
+            ..OPTS
+        };
+        let mut p = Pager::new(d, &opts, 40, 10);
+        press(&mut p, "5g");
+        p.watched_at -= WATCH_POLL;
+        assert!(!p.check_watched(), "nothing changed yet");
+        rewrite(&path, &numbered(40));
+        p.watched_at -= WATCH_POLL;
+        assert!(p.check_watched());
+        assert_eq!(top_text(&p), "line 5");
+        assert_eq!(p.doc.files[0].raw.len(), 40);
+        assert!(p.status().contains("[watching]"));
+        // At the end, a growing file keeps its end in view.
+        press(&mut p, "G");
+        rewrite(&path, &numbered(50));
+        p.watched_at -= WATCH_POLL;
+        p.check_watched();
+        assert_eq!(top_text(&p), "line 42");
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn capital_r_reloads() {
+        let (path, d) = on_disk("r.txt", "old\n");
+        let reload = read_plain;
+        let opts = Options {
+            reload: Some(&reload),
+            ..OPTS
+        };
+        let mut p = Pager::new(d, &opts, 40, 10);
+        std::fs::write(&path, "new\n").unwrap();
+        press(&mut p, "R");
+        assert_eq!(top_text(&p), "new");
+        assert!(p.message.as_deref().unwrap().starts_with("Reloaded"));
+        // Without --watch nothing is checked.
+        assert!(!p.check_watched());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

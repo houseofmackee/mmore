@@ -40,6 +40,10 @@ const KEYS: &[(&str, &str)] = &[
     (":f  =  Ctrl-G", "Show file name and line number"),
     ("m", "Toggle rendered view and raw source"),
     ("v", "Edit the file ($VISUAL or $EDITOR), then reload it"),
+    (
+        "R",
+        "Reload the file (--watch does it when the file changes)",
+    ),
     ("h", "Show or close this help"),
     ("Ctrl-Z", "Suspend (fg to resume)"),
     ("q  :q  Ctrl-C", "Quit"),

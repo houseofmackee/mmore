@@ -341,6 +341,7 @@ fn output(
             hyperlinks,
             mouse: cli.mouse,
             chop: cli.chop_long_lines,
+            watch: cli.watch,
             reload: Some(&reload),
         },
     )

@@ -81,6 +81,7 @@ somewhere else, add `--root DIR` (the binary goes in `DIR/bin`).
 | `=`, `:f`, `Ctrl-G` | Show the file name and line number |
 | `m` | Switch between the rendered view and the raw source |
 | `v` | Edit the file in `$VISUAL` or `$EDITOR`, at the current line, then reload it |
+| `R` | Reload the file |
 | `h` | Help |
 | `Ctrl-Z` | Suspend (`fg` resumes) |
 | `q`, `:q`, `Ctrl-C` | Quit |
@@ -105,6 +106,7 @@ followed by `&error` shows new errors only.
 | `--ascii` | Draw Markdown structure with ASCII characters only |
 | `--no-front-matter` | Hide YAML or TOML front matter |
 | `-e`, `--exit-at-eof` | Quit when paging past the end, like classic `more` |
+| `--watch` | Reload the file whenever it changes on disk |
 | `--no-pager`, `--always-page` | Never page, or page even short input |
 | `--mouse` | Scroll with the mouse wheel (see below) |
 | `--show-escapes` | Show escape codes in plain text (`^[[31m`) instead of their colors |

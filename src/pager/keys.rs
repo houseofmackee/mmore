@@ -43,6 +43,8 @@ pub enum Action {
     PrevHeading,
     /// Table of contents (`t`).
     Contents,
+    /// Load the file again (`R`).
+    Reload,
     Quit,
     None,
 }
@@ -100,6 +102,7 @@ pub fn map(key: KeyEvent) -> Action {
         KeyCode::Char(']') => Action::NextHeading,
         KeyCode::Char('[') => Action::PrevHeading,
         KeyCode::Char('t') => Action::Contents,
+        KeyCode::Char('R') => Action::Reload,
         _ => Action::None,
     }
 }

@@ -9,6 +9,9 @@ section here, so a version can only be released once it has one.
 
 - `]` and `[` jump to the next and previous heading in Markdown, and `t` opens a
   table of contents to choose one from.
+- `--watch` reloads the file whenever it changes on disk, to preview a document
+  while editing it or keep up with a log; at the end of the file it stays at the
+  end. `R` reloads by hand.
 
 ## [0.2.0] - 2026-11-02
 

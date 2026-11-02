@@ -145,6 +145,11 @@ pub struct Cli {
     #[arg(long)]
     pub show_escapes: bool,
 
+    /// Reload the file when it changes on disk (to preview a document while
+    /// editing it, or to keep up with a log file).
+    #[arg(long)]
+    pub watch: bool,
+
     /// Display binary files anyway.
     #[arg(long)]
     pub force: bool,
