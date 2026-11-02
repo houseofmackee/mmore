@@ -25,7 +25,7 @@ const KEYS: &[(&str, &str)] = &[
         "Search forward (regex; case-insensitive if all lowercase)",
     ),
     ("?pattern", "Search backward"),
-    ("n  N", "Next / previous match"),
+    ("n  N", "Next / previous match (on into the other files)"),
     ("]  [", "Next / previous heading (Markdown)"),
     (
         "t",

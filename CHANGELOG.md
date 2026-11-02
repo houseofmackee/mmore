@@ -9,6 +9,8 @@ section here, so a version can only be released once it has one.
 
 - Compressed files (gzip, bzip2, xz, and zstd) are shown decompressed, and
   `guide.md.gz` is rendered as Markdown.
+- With several files, searching goes on into the next (or previous) file once the
+  current one has no more matches.
 
 ## [0.3.0] - 2026-11-02
 

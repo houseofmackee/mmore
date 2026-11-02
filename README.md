@@ -91,7 +91,9 @@ somewhere else, add `--root DIR` (the binary goes in `DIR/bin`).
 Searches and filters are regular expressions. They ignore case unless the pattern
 contains an uppercase letter. While you type a search, the view already jumps to
 the first match; Enter keeps it and Esc goes back to where you were. An empty
-search pattern repeats the previous search.
+search pattern repeats the previous search. With several files, a search that
+finds nothing more in the current file goes on to the next file with a match (or
+the previous one, going backward).
 A filter also applies to piped input as it arrives, so `tail -f app.log | mmore`
 followed by `&error` shows new errors only.
 

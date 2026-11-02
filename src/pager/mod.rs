@@ -971,8 +971,57 @@ impl<'a> Pager<'a> {
                 self.cursor = Some((row, vp.top));
                 self.reveal_match(row);
             }
-            None => self.message = Some("Pattern not found".into()),
+            None => self.jump_to_other_file(forward),
         }
+    }
+
+    /// No more matches in this file: go on to the first match in the next files
+    /// (or the last match in the previous ones, going backward).
+    fn jump_to_other_file(&mut self, forward: bool) {
+        let Some(search) = self.search.clone() else {
+            return;
+        };
+        let others: Vec<usize> = if forward {
+            (self.file + 1..self.doc.files.len()).collect()
+        } else {
+            (0..self.file).rev().collect()
+        };
+        let Some(file) = others
+            .into_iter()
+            .find(|&f| self.file_has_match(f, &search))
+        else {
+            self.message = Some("Pattern not found".into());
+            return;
+        };
+        self.switch_file(file);
+        let starts = &self.view.matches.starts;
+        let found = if forward {
+            search::find(starts, 0, true, true)
+        } else {
+            starts
+                .len()
+                .checked_sub(1)
+                .and_then(|last| search::find(starts, last, false, true))
+        };
+        if let Some(row) = found {
+            let vp = &mut self.view.vp;
+            vp.top = row.min(vp.max_top());
+            self.cursor = Some((row, vp.top));
+            self.reveal_match(row);
+        }
+        self.message = Some(format!("Found in {}", self.doc.files[file].name));
+    }
+
+    /// Whether file `index`, as it would be shown now, has a match.
+    fn file_has_match(&self, index: usize, search: &Search) -> bool {
+        let gutter = self.doc.gutter_width(index);
+        let rendered = self
+            .doc
+            .render_file(index, self.content_width(gutter), self.raw);
+        rendered.lines.iter().any(|line| {
+            let text = line.text();
+            search.is_match(&text) && self.filter.as_ref().is_none_or(|f| f.is_match(&text))
+        })
     }
 
     /// With long lines cut off, scroll sideways so the match in `row` is visible.
@@ -1495,6 +1544,39 @@ mod tests {
         assert_eq!(top_text(&p), "Beta");
         press(&mut p, "/(\n");
         assert!(p.message.as_deref().unwrap().starts_with("Invalid pattern"));
+    }
+
+    #[test]
+    fn search_continues_in_the_other_files() {
+        let mut p = Pager::new(
+            doc(&[
+                ("a.txt", "apple\nneedle one\n"),
+                ("b.txt", "nothing here\n"),
+                ("c.txt", "x\ny\nneedle two\nneedle three\n"),
+            ]),
+            &OPTS,
+            40,
+            2,
+        );
+        press(&mut p, "/needle\n");
+        assert_eq!(p.file, 0);
+        press(&mut p, "n");
+        assert_eq!(p.file, 2, "skips the file without a match");
+        assert_eq!(top_text(&p), "needle two");
+        assert_eq!(p.message.as_deref(), Some("Found in c.txt"));
+        press(&mut p, "n");
+        assert_eq!(top_text(&p), "needle three");
+        press(&mut p, "n");
+        assert_eq!(p.message.as_deref(), Some("Pattern not found"));
+        // Backward goes to the last match of an earlier file.
+        press(&mut p, "NN");
+        assert_eq!(p.file, 0);
+        assert_eq!(top_text(&p), "needle one");
+        // A new search that only matches elsewhere goes there too.
+        press(&mut p, "/nothing\n");
+        assert_eq!(p.file, 1);
+        press(&mut p, "''");
+        assert_eq!(p.file, 0);
     }
 
     #[test]
