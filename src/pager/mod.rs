@@ -63,8 +63,11 @@ pub fn run(document: &Document, opts: &Options) -> io::Result<()> {
             drawn = pager.highlight_progress();
             dirty = false;
         }
-        // Highlighting may have finished since the last draw: show it before waiting.
-        if !pager.highlighting() && pager.newly_highlighted_on_screen(drawn) {
+        // Highlighting or input may have finished since the last draw: show what
+        // is new before waiting for a key, or it would never be pulled in.
+        if pager.pull_stream()
+            || (!pager.highlighting() && pager.newly_highlighted_on_screen(drawn))
+        {
             dirty = true;
             continue;
         }
@@ -1132,6 +1135,30 @@ mod tests {
         assert!(p.pull_stream(), "the end of input changes the status line");
         assert!(!p.reading());
         assert!(p.status().starts_with("--More--("));
+    }
+
+    #[test]
+    fn input_that_ends_before_the_first_pull_is_still_pulled() {
+        use std::io::Write as _;
+        let (d, mut w) = streamed();
+        for i in 1..=12 {
+            writeln!(w, "line {i}").unwrap();
+        }
+        d.stream(0)
+            .unwrap()
+            .wait_for(12, Some(std::time::Duration::from_secs(5)));
+        let mut p = Pager::new(&d, &OPTS, 40, 5);
+        assert_eq!(p.view.lines, 12);
+        writeln!(w, "line 13").unwrap();
+        drop(w);
+        d.stream(0).unwrap().wait_for(usize::MAX, None);
+        // Not reading any more, but the last line and the end are still pending.
+        assert!(!p.reading());
+        assert!(p.pull_stream());
+        assert_eq!(p.view.lines, 13);
+        assert!(p.status().starts_with("--More--("));
+        // Nothing left to pull: the loop can now wait for keys.
+        assert!(!p.pull_stream());
     }
 
     #[test]
