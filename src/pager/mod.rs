@@ -24,6 +24,8 @@ pub struct Options {
     /// Quit when moving forward while the last page is already shown (classic `more`).
     pub exit_at_eof: bool,
     pub color: ColorMode,
+    /// Emit OSC 8 hyperlinks.
+    pub hyperlinks: bool,
 }
 
 /// Page the document interactively until the user quits.
@@ -37,7 +39,7 @@ pub fn run(document: &Document, opts: &Options) -> io::Result<()> {
     let mut vp = Viewport::new(wrapped.rows.len(), content_height(rows));
 
     loop {
-        draw(&mut out, &wrapped, &vp, cols, opts.color)?;
+        draw(&mut out, &wrapped, &vp, cols, opts)?;
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 let action = keys::map(key);
@@ -74,13 +76,14 @@ fn draw(
     wrapped: &Wrapped,
     vp: &Viewport,
     cols: u16,
-    color: ColorMode,
+    opts: &Options,
 ) -> io::Result<()> {
+    let links = opts.hyperlinks.then_some(wrapped.links.as_slice());
     for i in 0..vp.height {
         // Clear before printing: clearing after a full-width row would erase its last cell.
         queue!(out, MoveTo(0, i as u16), Clear(ClearType::CurrentLine))?;
         if let Some(row) = wrapped.rows.get(vp.top + i) {
-            queue!(out, Print(ansi::render(row, color)))?;
+            queue!(out, Print(ansi::render(row, opts.color, links)))?;
         }
     }
 
@@ -155,7 +158,12 @@ mod tests {
         let mut vp = Viewport::new(wrapped.rows.len(), 10);
         vp.apply(Action::PageDown);
         let mut buf = Vec::new();
-        draw(&mut buf, &wrapped, &vp, 80, ColorMode::None).unwrap();
+        let opts = Options {
+            exit_at_eof: false,
+            color: ColorMode::None,
+            hyperlinks: false,
+        };
+        draw(&mut buf, &wrapped, &vp, 80, &opts).unwrap();
         let screen = String::from_utf8(buf).unwrap();
         assert!(screen.contains("line 11"));
         assert!(screen.contains("line 20"));

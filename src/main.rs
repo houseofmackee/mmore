@@ -15,10 +15,11 @@ use std::process::ExitCode;
 use clap::{CommandFactory, Parser};
 use syntect::highlighting::Theme;
 
-use ansi::{ColorMode, ColorWhen};
+use ansi::{ColorMode, When};
 use cli::Cli;
 use detect::Kind;
 use document::{Document, Section};
+use render::Rendered;
 use source::{Origin, Source};
 use style::Line;
 
@@ -59,13 +60,18 @@ fn main() -> ExitCode {
     let color = ColorMode::resolve(cli.color, stdout_is_tty);
     let settings = Settings {
         // Piped output stays raw (like `more` and `cat`) unless colors are forced.
-        render: !cli.plain && (stdout_is_tty || cli.color == ColorWhen::Always),
+        render: !cli.plain && (stdout_is_tty || cli.color == When::Always),
         highlight: color.enabled(),
         theme,
     };
     let (document, all_ok) = collect(&cli, &origins, &settings);
+    let hyperlinks = match cli.hyperlinks {
+        When::Always => true,
+        When::Never => false,
+        When::Auto => stdout_is_tty && color.enabled() && ansi::hyperlinks_supported(),
+    };
 
-    match output(&cli, &document, color, stdout_is_tty) {
+    match output(&cli, &document, color, hyperlinks, stdout_is_tty) {
         Ok(()) if all_ok => ExitCode::SUCCESS,
         Ok(()) => ExitCode::FAILURE,
         Err(e) => {
@@ -147,6 +153,8 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
         max_width: cli.max_width.into(),
         highlight: settings.highlight,
         theme: settings.theme,
+        ascii: cli.ascii,
+        front_matter: !cli.no_front_matter,
     };
     (document, all_ok)
 }
@@ -172,22 +180,29 @@ fn section(cli: &Cli, origin: &Origin, text: String, settings: &Settings) -> Sec
 }
 
 /// Page the document on a terminal, or print it when paging is off or pointless.
-fn output(cli: &Cli, document: &Document, color: ColorMode, stdout_is_tty: bool) -> io::Result<()> {
+fn output(
+    cli: &Cli,
+    document: &Document,
+    color: ColorMode,
+    hyperlinks: bool,
+    stdout_is_tty: bool,
+) -> io::Result<()> {
     let size = crossterm::terminal::size().ok().filter(|_| stdout_is_tty);
     let Some((cols, rows)) = size.filter(|_| !cli.no_pager) else {
         let width = size.map_or(DEFAULT_WIDTH, |(cols, _)| cols as usize);
-        return dump(&document.render(width).lines, color);
+        return dump(&document.render(width), color, hyperlinks);
     };
     let rendered = document.render(cols as usize);
     // Leave a row free so the shell prompt does not push the first line off screen.
     if !cli.always_page && wrap::row_count(&rendered.lines, cols as usize) < rows as usize {
-        return dump(&rendered.lines, color);
+        return dump(&rendered, color, hyperlinks);
     }
     pager::run(
         document,
         &pager::Options {
             exit_at_eof: cli.exit_at_eof,
             color,
+            hyperlinks,
         },
     )
 }
@@ -195,10 +210,11 @@ fn output(cli: &Cli, document: &Document, color: ColorMode, stdout_is_tty: bool)
 /// Render width when there is no terminal to measure.
 const DEFAULT_WIDTH: usize = 80;
 
-fn dump(lines: &[Line], color: ColorMode) -> io::Result<()> {
+fn dump(rendered: &Rendered, color: ColorMode, hyperlinks: bool) -> io::Result<()> {
+    let links = hyperlinks.then_some(rendered.links.as_slice());
     let mut out = BufWriter::new(io::stdout().lock());
-    for line in lines {
-        writeln!(out, "{}", ansi::render(line, color))?;
+    for line in &rendered.lines {
+        writeln!(out, "{}", ansi::render(line, color, links))?;
     }
     out.flush()
 }

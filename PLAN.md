@@ -125,7 +125,7 @@ Walk the `pulldown-cmark` event stream with a style stack and a block-context st
 | Task list             | `☐` / `☑` (ASCII `[ ]` / `[x]` with `--ascii`)                                                 |
 | Table                 | Box-drawing borders, header in bold, column alignment from `:---:` markers. If too wide, shrink columns proportionally and wrap cell text; as last resort, render each row as a "key: value" record |
 | Horizontal rule       | Dim `─` line across the content width                                                         |
-| Link                  | Underlined text; URL shown dim in parentheses after it unless text equals URL. Emit OSC 8 hyperlinks when the terminal supports them (`--hyperlinks auto/always/never`) |
+| Link                  | Underlined text; URL shown dim in parentheses after it unless text equals URL. Emit OSC 8 hyperlinks for absolute URLs when the terminal supports them (`--hyperlinks auto/always/never`); relative paths and anchors are not clickable |
 | Image                 | `🖼 alt text` (or `[image: alt]` in ASCII mode) plus dim URL                                    |
 | Footnotes             | `[^1]` as superscript-ish dim marker; definitions rendered at their position with a label     |
 | HTML blocks / inline  | Passed through dim; `<br>` becomes a line break; `<!-- comments -->` hidden                    |

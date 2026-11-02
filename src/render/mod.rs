@@ -3,6 +3,8 @@
 pub mod code;
 pub mod markdown;
 pub mod plain;
+pub mod symbols;
+pub mod table;
 
 use crate::style::Line;
 
@@ -12,6 +14,8 @@ use crate::style::Line;
 pub struct Rendered {
     pub lines: Vec<Line>,
     pub source: Vec<usize>,
+    /// Hyperlink targets, indexed by `Style::link`.
+    pub links: Vec<String>,
 }
 
 impl Rendered {

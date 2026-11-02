@@ -25,6 +25,10 @@ pub struct Document {
     /// Whether to syntax-highlight code blocks inside Markdown.
     pub highlight: bool,
     pub theme: &'static Theme,
+    /// Draw Markdown with ASCII characters only.
+    pub ascii: bool,
+    /// Show front matter in Markdown files.
+    pub front_matter: bool,
 }
 
 impl Document {
@@ -47,10 +51,20 @@ impl Document {
                         width: width.min(self.max_width).max(1),
                         highlight: self.highlight,
                         theme: self.theme,
+                        ascii: self.ascii,
+                        front_matter: self.front_matter,
                     };
                     let rendered = markdown::render(text, &opts);
+                    // Link indexes are per section; shift them into the shared table.
+                    let link_base = out.links.len() as u32;
+                    out.links.extend(rendered.links);
                     let mut last = base;
-                    for (line, source) in rendered.lines.into_iter().zip(rendered.source) {
+                    for (mut line, source) in rendered.lines.into_iter().zip(rendered.source) {
+                        for span in &mut line.spans {
+                            if let Some(link) = &mut span.style.link {
+                                *link += link_base;
+                            }
+                        }
                         last = last.max(base + source);
                         out.push(line, last);
                     }
@@ -74,7 +88,21 @@ mod tests {
             max_width: 100,
             highlight: false,
             theme: assets::theme(assets::DEFAULT_DARK_THEME).unwrap(),
+            ascii: false,
+            front_matter: true,
         }
+    }
+
+    #[test]
+    fn links_from_several_files_share_one_table() {
+        let d = doc(vec![
+            Section::Markdown("[a](https://one)".into()),
+            Section::Markdown("[b](https://two)".into()),
+        ]);
+        let r = d.render(40);
+        assert_eq!(r.links, vec!["https://one", "https://two"]);
+        let b_line = r.lines.iter().find(|l| l.text().starts_with('b')).unwrap();
+        assert_eq!(b_line.spans[0].style.link, Some(1));
     }
 
     #[test]

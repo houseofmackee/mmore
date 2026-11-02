@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::ansi::ColorWhen;
+use crate::ansi::When;
 
 /// A pager like `more`, with Markdown rendering and syntax highlighting.
 #[derive(Debug, Parser)]
@@ -42,8 +42,20 @@ pub struct Cli {
     pub max_width: u16,
 
     /// When to use colors.
-    #[arg(long, value_enum, value_name = "WHEN", default_value_t = ColorWhen::Auto)]
-    pub color: ColorWhen,
+    #[arg(long, value_enum, value_name = "WHEN", default_value_t = When::Auto)]
+    pub color: When,
+
+    /// When to make links clickable (OSC 8 hyperlinks).
+    #[arg(long, value_enum, value_name = "WHEN", default_value_t = When::Auto)]
+    pub hyperlinks: When,
+
+    /// Draw Markdown with ASCII characters instead of Unicode symbols.
+    #[arg(long)]
+    pub ascii: bool,
+
+    /// Hide YAML/TOML front matter in Markdown files.
+    #[arg(long)]
+    pub no_front_matter: bool,
 
     /// Display binary files anyway.
     #[arg(long)]

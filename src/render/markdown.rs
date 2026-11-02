@@ -1,17 +1,22 @@
 //! Markdown rendering: walks the pulldown-cmark event stream and lays out styled,
 //! word-wrapped lines.
 //!
-//! Block structure is tracked with a stack of containers (block quotes and list
-//! items). Each output line starts with the prefixes of all open containers: a bar
-//! for quotes, and the item marker (first line) or matching indentation (later
-//! lines) for list items.
+//! Block structure is tracked with a stack of containers (block quotes, list
+//! items, and footnote definitions). Each output line starts with the prefixes of
+//! all open containers: a bar for quotes, and the item marker (first line) or
+//! matching indentation (later lines) for list items and footnotes.
 
 use std::ops::Range;
 
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, LinkType, MetadataBlockKind, Options,
+    Parser, Tag, TagEnd,
+};
 use syntect::highlighting::Theme;
 use unicode_width::UnicodeWidthStr;
 
+use super::symbols::{self, Symbols};
+use super::table::{self, Table};
 use super::{Rendered, code, plain};
 use crate::assets;
 use crate::detect::{self, Kind};
@@ -24,14 +29,22 @@ pub struct MdOptions<'a> {
     /// Whether to syntax-highlight code blocks.
     pub highlight: bool,
     pub theme: &'a Theme,
+    /// Draw with ASCII characters only.
+    pub ascii: bool,
+    /// Show YAML/TOML front matter.
+    pub front_matter: bool,
 }
 
-const BULLETS: [&str; 3] = ["•", "◦", "▪"];
-
 pub fn render(text: &str, opts: &MdOptions) -> Rendered {
-    let events: Vec<(Event, Range<usize>)> = Parser::new_ext(text, Options::ENABLE_STRIKETHROUGH)
-        .into_offset_iter()
-        .collect();
+    let options = Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TABLES
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_GFM
+        | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+        | Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS;
+    let events: Vec<(Event, Range<usize>)> =
+        Parser::new_ext(text, options).into_offset_iter().collect();
     let mut r = Renderer::new(text, opts);
     for i in 0..events.len() {
         r.handle(&events, i);
@@ -68,6 +81,17 @@ fn heading_style(level: HeadingLevel) -> Style {
     }
 }
 
+/// Title and palette color of a GitHub alert (`> [!NOTE]`).
+fn alert(kind: BlockQuoteKind) -> (&'static str, u8) {
+    match kind {
+        BlockQuoteKind::Note => ("Note", 4),
+        BlockQuoteKind::Tip => ("Tip", 2),
+        BlockQuoteKind::Important => ("Important", 5),
+        BlockQuoteKind::Warning => ("Warning", 3),
+        BlockQuoteKind::Caution => ("Caution", 1),
+    }
+}
+
 struct ListState {
     /// Next item number for ordered lists.
     next: Option<u64>,
@@ -76,37 +100,55 @@ struct ListState {
 }
 
 enum Container {
-    Quote,
+    Quote {
+        bar: Style,
+    },
+    /// A list item or footnote definition.
     Item {
         marker: Span,
         width: usize,
         /// The marker has not been printed yet.
         first: bool,
+        /// The marker is a bullet, which a task checkbox may replace.
+        bullet: bool,
     },
 }
 
 struct CodeBlock {
     lang: Option<String>,
+    /// Shown in the top border instead of the language.
+    label: Option<String>,
     text: String,
+}
+
+struct TableState {
+    table: Table,
+    row: Vec<Vec<Span>>,
 }
 
 struct Renderer<'a> {
     opts: &'a MdOptions<'a>,
+    sym: &'static Symbols,
     line_starts: Vec<usize>,
     out: Rendered,
     containers: Vec<Container>,
     lists: Vec<ListState>,
-    /// Inline content of the current paragraph, heading, or tight list item.
+    /// Inline content of the current paragraph, heading, table cell, or tight
+    /// list item.
     inline: Vec<Span>,
     emphasis: usize,
     strong: usize,
     strike: usize,
-    link: usize,
+    image: usize,
     heading: Option<HeadingLevel>,
-    /// Open links: destination and the index in `inline` where the link text starts.
-    links: Vec<(String, usize)>,
+    /// Open links: destination, link table index (absolute URLs only), and the
+    /// position in `inline` where the link text starts.
+    links: Vec<(String, Option<u32>, usize)>,
+    /// Open images: destination URL.
+    images: Vec<String>,
     code: Option<CodeBlock>,
     html: Option<String>,
+    table: Option<TableState>,
     /// A blank line separates the next block from the previous one.
     need_blank: bool,
     /// Source line of the block being rendered.
@@ -120,6 +162,7 @@ impl<'a> Renderer<'a> {
             .collect();
         Renderer {
             opts,
+            sym: symbols::get(opts.ascii),
             line_starts,
             out: Rendered::default(),
             containers: Vec::new(),
@@ -128,11 +171,13 @@ impl<'a> Renderer<'a> {
             emphasis: 0,
             strong: 0,
             strike: 0,
-            link: 0,
+            image: 0,
             heading: None,
             links: Vec::new(),
+            images: Vec::new(),
             code: None,
             html: None,
+            table: None,
             need_blank: false,
             src: 0,
         }
@@ -176,15 +221,13 @@ impl<'a> Renderer<'a> {
                 self.begin_block(range);
                 let width = self.available();
                 self.emit(Line {
-                    spans: vec![Span::new("─".repeat(width), dim())],
+                    spans: vec![Span::new(self.sym.rule.repeat(width), dim())],
                 });
                 self.need_blank = true;
             }
-            Event::TaskListMarker(done) => {
-                self.push_text(if *done { "☑ " } else { "☐ " }, self.style());
-            }
+            Event::TaskListMarker(done) => self.task_marker(*done),
             Event::FootnoteReference(label) => {
-                self.push_text(&format!("[^{label}]"), dim());
+                self.push_text(&format!("[{label}]"), fg(6));
             }
             Event::InlineMath(t) | Event::DisplayMath(t) => self.push_text(t, self.style()),
         }
@@ -207,9 +250,24 @@ impl<'a> Renderer<'a> {
                     self.push_text(&format!("{} ", "#".repeat(depth)), dim());
                 }
             }
-            Tag::BlockQuote(_) => {
+            Tag::BlockQuote(kind) => {
                 self.begin_block(range);
-                self.containers.push(Container::Quote);
+                match kind.map(alert) {
+                    Some((title, color)) => {
+                        let style = fg(color);
+                        self.containers.push(Container::Quote { bar: style });
+                        self.emit(Line {
+                            spans: vec![Span::new(
+                                title,
+                                Style {
+                                    bold: true,
+                                    ..style
+                                },
+                            )],
+                        });
+                    }
+                    None => self.containers.push(Container::Quote { bar: dim() }),
+                }
             }
             Tag::CodeBlock(kind) => {
                 self.begin_block(range);
@@ -219,6 +277,19 @@ impl<'a> Renderer<'a> {
                 };
                 self.code = Some(CodeBlock {
                     lang,
+                    label: None,
+                    text: String::new(),
+                });
+            }
+            Tag::MetadataBlock(kind) => {
+                self.begin_block(range);
+                let lang = match kind {
+                    MetadataBlockKind::YamlStyle => "yaml",
+                    MetadataBlockKind::PlusesStyle => "toml",
+                };
+                self.code = Some(CodeBlock {
+                    lang: Some(lang.to_string()),
+                    label: Some(format!("front matter ({lang})")),
                     text: String::new(),
                 });
             }
@@ -240,31 +311,64 @@ impl<'a> Renderer<'a> {
             Tag::Item => {
                 self.begin_block(range);
                 let depth = self.lists.len().saturating_sub(1);
-                let text = match self.lists.last_mut() {
+                let (text, bullet) = match self.lists.last_mut() {
                     Some(ListState {
                         next: Some(n),
                         number_width,
                     }) => {
                         let text = format!("  {n:>number_width$}. ");
                         *n += 1;
-                        text
+                        (text, false)
                     }
-                    _ => format!("  {} ", BULLETS[depth % BULLETS.len()]),
+                    _ => {
+                        let bullets = &self.sym.bullets;
+                        (format!("  {} ", bullets[depth % bullets.len()]), true)
+                    }
                 };
-                self.containers.push(Container::Item {
-                    width: text.width(),
-                    marker: Span::new(text, fg(6)),
-                    first: true,
+                self.push_item(Span::new(text, fg(6)), bullet);
+            }
+            Tag::FootnoteDefinition(label) => {
+                self.begin_block(range);
+                self.push_item(Span::new(format!("[{label}] "), fg(6)), false);
+            }
+            Tag::Table(aligns) => {
+                self.begin_block(range);
+                self.table = Some(TableState {
+                    table: Table {
+                        aligns: aligns.clone(),
+                        rows: Vec::new(),
+                    },
+                    row: Vec::new(),
                 });
             }
+            Tag::TableHead | Tag::TableRow => {
+                if let Some(t) = &mut self.table {
+                    t.row.clear();
+                }
+            }
+            Tag::TableCell => self.inline.clear(),
             Tag::Emphasis => self.emphasis += 1,
             Tag::Strong => self.strong += 1,
             Tag::Strikethrough => self.strike += 1,
-            Tag::Link { dest_url, .. } => {
-                self.links.push((dest_url.to_string(), self.inline.len()));
-                self.link += 1;
+            Tag::Link {
+                link_type,
+                dest_url,
+                ..
+            } => {
+                // Email autolinks (<a@b.c>) come without their scheme.
+                let url = if *link_type == LinkType::Email {
+                    format!("mailto:{dest_url}")
+                } else {
+                    dest_url.to_string()
+                };
+                let index = self.register_link(&url);
+                self.links.push((url, index, self.inline.len()));
             }
-            Tag::Image { .. } => self.push_text("[image: ", dim()),
+            Tag::Image { dest_url, .. } => {
+                self.push_text(&format!("{} ", self.sym.image), dim());
+                self.images.push(dest_url.to_string());
+                self.image += 1;
+            }
             _ => {}
         }
     }
@@ -279,8 +383,8 @@ impl<'a> Renderer<'a> {
                 self.flush_inline();
                 let width = self.available();
                 let rule = match level {
-                    HeadingLevel::H1 => Some("═"),
-                    HeadingLevel::H2 => Some("─"),
+                    HeadingLevel::H1 => Some(self.sym.h1_rule),
+                    HeadingLevel::H2 => Some(self.sym.h2_rule),
                     _ => None,
                 };
                 if let Some(rule) = rule {
@@ -306,6 +410,14 @@ impl<'a> Renderer<'a> {
                 }
                 self.need_blank = true;
             }
+            TagEnd::MetadataBlock(_) => {
+                if let Some(code) = self.code.take()
+                    && self.opts.front_matter
+                {
+                    self.emit_code_block(code);
+                    self.need_blank = true;
+                }
+            }
             TagEnd::HtmlBlock => {
                 if let Some(html) = self.html.take() {
                     self.emit_html_block(&html);
@@ -319,43 +431,125 @@ impl<'a> Renderer<'a> {
                     self.need_blank = true;
                 }
             }
-            TagEnd::Item => {
-                self.flush_inline();
-                // An empty item still shows its marker.
-                if let Some(Container::Item { first: true, .. }) = self.containers.last() {
-                    self.emit(Line::default());
+            TagEnd::Item => self.end_item(),
+            TagEnd::FootnoteDefinition => {
+                self.end_item();
+                self.need_blank = true;
+            }
+            TagEnd::TableCell => {
+                let cell = sanitize_spans(std::mem::take(&mut self.inline));
+                if let Some(t) = &mut self.table {
+                    t.row.push(cell);
                 }
-                self.containers.pop();
+            }
+            TagEnd::TableHead | TagEnd::TableRow => {
+                if let Some(t) = &mut self.table {
+                    let row = std::mem::take(&mut t.row);
+                    t.table.rows.push(row);
+                }
+            }
+            TagEnd::Table => {
+                if let Some(t) = self.table.take() {
+                    for line in table::layout(&t.table, self.available(), self.sym) {
+                        self.emit(line);
+                    }
+                }
+                self.need_blank = true;
             }
             TagEnd::Emphasis => self.emphasis = self.emphasis.saturating_sub(1),
             TagEnd::Strong => self.strong = self.strong.saturating_sub(1),
             TagEnd::Strikethrough => self.strike = self.strike.saturating_sub(1),
             TagEnd::Link => {
-                self.link = self.link.saturating_sub(1);
-                if let Some((url, start)) = self.links.pop() {
+                if let Some((url, index, start)) = self.links.pop() {
                     let text: String = self.inline[start.min(self.inline.len())..]
                         .iter()
                         .map(|s| s.text.as_str())
                         .collect();
                     if show_url(&url, &text) {
-                        self.push_text(&format!(" ({url})"), dim());
+                        let style = Style {
+                            link: index,
+                            ..dim()
+                        };
+                        self.push_text(&format!(" ({url})"), style);
                     }
                 }
             }
-            TagEnd::Image => self.push_text("]", dim()),
+            TagEnd::Image => {
+                self.image = self.image.saturating_sub(1);
+                let url = self.images.pop().unwrap_or_default();
+                // Inside a link (a badge), the link's URL is the one that matters.
+                if self.links.is_empty() && !url.is_empty() {
+                    let index = self.register_link(&url);
+                    let style = Style {
+                        link: index,
+                        ..dim()
+                    };
+                    self.push_text(&format!(" ({url})"), style);
+                }
+            }
             _ => {}
         }
     }
 
-    /// Current inline style from the open emphasis, link, and heading tags.
+    /// Add a hyperlink target. Only absolute URLs can be opened from a terminal,
+    /// so relative paths and in-page anchors get no link.
+    fn register_link(&mut self, url: &str) -> Option<u32> {
+        if !is_absolute_url(url) {
+            return None;
+        }
+        self.out.links.push(url.to_string());
+        Some((self.out.links.len() - 1) as u32)
+    }
+
+    fn push_item(&mut self, marker: Span, bullet: bool) {
+        self.containers.push(Container::Item {
+            width: marker.text.width(),
+            marker,
+            first: true,
+            bullet,
+        });
+    }
+
+    fn end_item(&mut self) {
+        self.flush_inline();
+        // An empty item still shows its marker.
+        if let Some(Container::Item { first: true, .. }) = self.containers.last() {
+            self.emit(Line::default());
+        }
+        self.containers.pop();
+    }
+
+    /// A task list checkbox replaces the bullet of its item, or else goes inline.
+    fn task_marker(&mut self, done: bool) {
+        let (symbol, style) = if done {
+            (self.sym.checked, fg(2))
+        } else {
+            (self.sym.unchecked, fg(6))
+        };
+        if let Some(Container::Item {
+            marker,
+            width,
+            first: true,
+            bullet: true,
+        }) = self.containers.last_mut()
+        {
+            *marker = Span::new(format!("  {symbol} "), style);
+            *width = marker.text.width();
+        } else {
+            self.push_text(&format!("{symbol} "), style);
+        }
+    }
+
+    /// Current inline style from the open emphasis, link, image, and heading tags.
     fn style(&self) -> Style {
         let mut style = self.heading.map(heading_style).unwrap_or_default();
-        style.italic |= self.emphasis > 0;
+        style.italic |= self.emphasis > 0 || self.image > 0;
         style.bold |= self.strong > 0;
         style.strike |= self.strike > 0;
-        if self.link > 0 {
+        if let Some((_, index, _)) = self.links.last() {
             style.underline = true;
             style.fg = Some(Color::Ansi(4));
+            style.link = *index;
         }
         style
     }
@@ -386,11 +580,12 @@ impl<'a> Renderer<'a> {
 
     /// Width left for content after the container prefixes.
     fn available(&self) -> usize {
+        let bar = self.sym.quote_bar.width() + 1;
         let prefix: usize = self
             .containers
             .iter()
             .map(|c| match c {
-                Container::Quote => 2,
+                Container::Quote { .. } => bar,
                 Container::Item { width, .. } => *width,
             })
             .sum();
@@ -403,11 +598,15 @@ impl<'a> Renderer<'a> {
         let mut line = Line::default();
         for container in &mut self.containers {
             match container {
-                Container::Quote => line.push("│ ", dim()),
+                Container::Quote { bar } => {
+                    line.push(self.sym.quote_bar, *bar);
+                    line.push(" ", Style::default());
+                }
                 Container::Item {
                     marker,
                     width,
                     first,
+                    ..
                 } => {
                     if *first && consume {
                         line.push(&marker.text, marker.style);
@@ -433,20 +632,7 @@ impl<'a> Renderer<'a> {
             self.inline.clear();
             return;
         }
-        let spans: Vec<Span> = std::mem::take(&mut self.inline)
-            .into_iter()
-            .map(|s| {
-                if s.text == "\n" {
-                    s
-                } else {
-                    // Tabs and control characters must not reach the terminal raw.
-                    let clean = plain::sanitize(&Line {
-                        spans: vec![s.clone()],
-                    });
-                    Span::new(clean.text(), s.style)
-                }
-            })
-            .collect();
+        let spans = sanitize_spans(std::mem::take(&mut self.inline));
         for row in wrap::wrap_words(&spans, self.available()) {
             self.emit(row);
         }
@@ -455,11 +641,11 @@ impl<'a> Renderer<'a> {
     fn emit_code_block(&mut self, block: CodeBlock) {
         let start = self.src;
         let mut top = Line::default();
-        top.push("┌─", dim());
-        if let Some(lang) = &block.lang {
+        top.push(self.sym.code_top, dim());
+        if let Some(label) = block.label.as_ref().or(block.lang.as_ref()) {
             top.push(" ", dim());
             top.push(
-                lang,
+                label,
                 Style {
                     italic: true,
                     ..dim()
@@ -469,19 +655,20 @@ impl<'a> Renderer<'a> {
         self.emit(top);
 
         let lines = self.highlight(&block);
-        let width = self.available().saturating_sub(2).max(1);
+        let side = format!("{} ", self.sym.code_side);
+        let width = self.available().saturating_sub(side.width()).max(1);
         for (i, line) in lines.iter().enumerate() {
             self.src = start + 1 + i;
             for row in wrap::wrap_line(line, width) {
                 let mut content = Line::default();
-                content.push("│ ", dim());
+                content.push(&side, dim());
                 content.append(row);
                 self.emit(content);
             }
         }
         self.src = start + lines.len() + 1;
         self.emit(Line {
-            spans: vec![Span::new("└─", dim())],
+            spans: vec![Span::new(self.sym.code_bottom, dim())],
         });
     }
 
@@ -516,6 +703,24 @@ impl<'a> Renderer<'a> {
     }
 }
 
+/// Tabs and control characters must not reach the terminal raw. Spans that are a
+/// single "\n" are hard line breaks and stay as they are.
+fn sanitize_spans(spans: Vec<Span>) -> Vec<Span> {
+    spans
+        .into_iter()
+        .map(|s| {
+            if s.text == "\n" {
+                s
+            } else {
+                let clean = plain::sanitize(&Line {
+                    spans: vec![s.clone()],
+                });
+                Span::new(clean.text(), s.style)
+            }
+        })
+        .collect()
+}
+
 /// First word of a fenced code block's info string: "rust,ignore" and "{.python}"
 /// both name the language.
 fn code_lang(info: &str) -> Option<String> {
@@ -531,6 +736,17 @@ fn show_url(url: &str, text: &str) -> bool {
         && !url.starts_with('#')
         && url != text
         && url.strip_prefix("mailto:") != Some(text)
+}
+
+/// A URL with a scheme ("https://...", "mailto:...").
+fn is_absolute_url(url: &str) -> bool {
+    url.split_once(':').is_some_and(|(scheme, rest)| {
+        scheme.len() > 1
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+            && (rest.starts_with("//") || scheme.eq_ignore_ascii_case("mailto"))
+    })
 }
 
 /// Number of items in the list starting at `events[start]`.
@@ -559,6 +775,8 @@ mod tests {
             width,
             highlight: false,
             theme: assets::theme(assets::DEFAULT_DARK_THEME).unwrap(),
+            ascii: false,
+            front_matter: true,
         }
     }
 
@@ -607,6 +825,10 @@ mod tests {
         assert_eq!(text("[top](#top)", 40), "top");
         assert_eq!(text("<me@x.io>", 40), "me@x.io");
         assert_eq!(marked("[a](u)", 40), "{u,fg4}a{/}{dim} (u){/}");
+        assert_eq!(
+            marked("[a](https://u)", 40),
+            "{u,fg4,link0}a{/}{dim,link0} (https://u){/}"
+        );
     }
 
     #[test]
@@ -722,5 +944,164 @@ mod tests {
         let md = include_str!("../../tests/fixtures/markdown/basic.md");
         insta::assert_snapshot!("basic_60", marked(md, 60));
         insta::assert_snapshot!("basic_32", text(md, 32));
+    }
+
+    fn with(md: &str, width: usize, f: impl FnOnce(&mut MdOptions)) -> String {
+        let mut o = opts(width);
+        f(&mut o);
+        let r = render(md, &o);
+        r.lines
+            .iter()
+            .map(Line::text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn links_are_registered_for_hyperlinks() {
+        let r = render(
+            "[a](https://a.io) ![img](https://x.io/p.png) [rel](docs/x.md) [top](#top)",
+            &opts(80),
+        );
+        assert_eq!(r.links, vec!["https://a.io", "https://x.io/p.png"]);
+        let texts: Vec<String> = r.lines.iter().map(markup).collect();
+        assert!(texts[0].contains("{u,fg4,link0}a{/}"), "{texts:?}");
+        assert!(
+            texts[0].contains("{dim,link1} (https://x.io/p.png){/}"),
+            "{texts:?}"
+        );
+        // Relative links keep their style but are not clickable.
+        assert!(
+            texts[0].contains("{u,fg4}rel{/}{dim} (docs/x.md){/}"),
+            "{texts:?}"
+        );
+        assert!(texts[0].contains("{u,fg4}top{/}"), "{texts:?}");
+    }
+
+    #[test]
+    fn email_autolinks_become_mailto() {
+        let r = render("<me@x.io>", &opts(40));
+        assert_eq!(r.links, vec!["mailto:me@x.io"]);
+        assert_eq!(markup(&r.lines[0]), "{u,fg4,link0}me@x.io{/}");
+    }
+
+    #[test]
+    fn absolute_url_detection() {
+        assert!(is_absolute_url("https://example.com"));
+        assert!(is_absolute_url("mailto:a@b.c"));
+        assert!(is_absolute_url("file:///tmp/x"));
+        assert!(!is_absolute_url("docs/readme.md"));
+        assert!(!is_absolute_url("#anchor"));
+        assert!(!is_absolute_url("C:\\path"));
+        assert!(!is_absolute_url("javascript:alert(1)"));
+    }
+
+    #[test]
+    fn images_show_alt_text_and_url() {
+        assert_eq!(
+            text("![a logo](img/logo.png)", 80),
+            "▣ a logo (img/logo.png)"
+        );
+        assert_eq!(marked("![x](u)", 80), "{dim}▣ {/}{i}x{/}{dim} (u){/}");
+    }
+
+    #[test]
+    fn badges_show_only_the_link_url() {
+        assert_eq!(
+            text("[![build](https://ci/badge.svg)](https://ci)", 80),
+            "▣ build (https://ci)"
+        );
+    }
+
+    #[test]
+    fn task_lists_replace_bullets() {
+        assert_eq!(
+            text("- [ ] todo\n- [x] done\n- plain", 40),
+            "  ☐ todo\n  ☑ done\n  • plain"
+        );
+        assert_eq!(text("1. [x] first", 40), "  1. ☑ first");
+        assert_eq!(
+            with("- [ ] todo task\n- [x] done", 12, |o| o.ascii = true),
+            "  [ ] todo\n      task\n  [x] done"
+        );
+    }
+
+    #[test]
+    fn footnotes() {
+        let md = "Claim.[^1]\n\n[^1]: The source,\n    continued.";
+        assert_eq!(text(md, 40), "Claim.[1]\n\n[1] The source, continued.");
+        assert_eq!(
+            text(md, 14),
+            "Claim.[1]\n\n[1] The\n    source,\n    continued."
+        );
+    }
+
+    #[test]
+    fn github_alerts() {
+        let md = "> [!WARNING]\n> Be careful.";
+        assert_eq!(text(md, 40), "│ Warning\n│ Be careful.");
+        assert_eq!(
+            marked(md, 40),
+            "{fg3}│{/} {b,fg3}Warning{/}\n{fg3}│{/} Be careful."
+        );
+        assert_eq!(text("> plain quote", 40), "│ plain quote");
+    }
+
+    #[test]
+    fn front_matter() {
+        let md = "---\ntitle: Hi\ntags: [a]\n---\n\n# Doc";
+        assert_eq!(
+            text(md, 20),
+            "┌─ front matter (yaml)\n│ title: Hi\n│ tags: [a]\n└─\n\nDoc\n════════════════════"
+        );
+        assert_eq!(
+            with(md, 20, |o| o.front_matter = false),
+            "Doc\n════════════════════"
+        );
+        assert!(text("+++\ntitle = 1\n+++\n", 40).starts_with("┌─ front matter (toml)"));
+    }
+
+    #[test]
+    fn tables() {
+        let md = "| a | b |\n|:-|-:|\n| x | 10 |";
+        assert_eq!(
+            text(md, 40),
+            "┌───┬────┐\n│ a │  b │\n├───┼────┤\n│ x │ 10 │\n└───┴────┘"
+        );
+    }
+
+    #[test]
+    fn table_cells_keep_inline_styles() {
+        let r = render("| h |\n|---|\n| `c` **b** |", &opts(40));
+        let row: String = markup(&r.lines[3]);
+        assert!(
+            row.contains("{fg1}c{/}") && row.contains("{b}b{/}"),
+            "{row}"
+        );
+    }
+
+    #[test]
+    fn table_in_quote_respects_prefix_width() {
+        let md = "> | col | other column |\n> |---|---|\n> | v | some longer text here |";
+        let out = text(md, 30);
+        assert!(out.lines().all(|l| l.width() <= 30), "{out}");
+        assert!(out.lines().all(|l| l.starts_with("│ ")), "{out}");
+    }
+
+    #[test]
+    fn ascii_symbols() {
+        let md = "# T\n\n- a\n  - b\n\n> q\n\n```\nc\n```\n\n---";
+        assert_eq!(
+            with(md, 6, |o| o.ascii = true),
+            "T\n======\n\n  * a\n      - b\n\n| q\n\n+-\n| c\n+-\n\n------"
+        );
+    }
+
+    #[test]
+    fn snapshot_extended_document() {
+        let md = include_str!("../../tests/fixtures/markdown/extended.md");
+        insta::assert_snapshot!("extended_80", text(md, 80));
+        insta::assert_snapshot!("extended_36", text(md, 36));
+        insta::assert_snapshot!("extended_ascii_50", with(md, 50, |o| o.ascii = true));
     }
 }

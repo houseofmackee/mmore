@@ -4,9 +4,9 @@ use std::env;
 
 use crate::style::{Color, Line, Style};
 
-/// When to use color, as chosen on the command line.
+/// When to use a feature (colors, hyperlinks), as chosen on the command line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum ColorWhen {
+pub enum When {
     Auto,
     Always,
     Never,
@@ -22,13 +22,13 @@ pub enum ColorMode {
 }
 
 impl ColorMode {
-    pub fn resolve(when: ColorWhen, is_tty: bool) -> ColorMode {
+    pub fn resolve(when: When, is_tty: bool) -> ColorMode {
         let colorterm = env::var("COLORTERM").unwrap_or_default();
         let term = env::var("TERM").unwrap_or_default();
         match when {
-            ColorWhen::Never => ColorMode::None,
-            ColorWhen::Always => depth(&colorterm, &term).max(ColorMode::Ansi16),
-            ColorWhen::Auto => {
+            When::Never => ColorMode::None,
+            When::Always => depth(&colorterm, &term).max(ColorMode::Ansi16),
+            When::Auto => {
                 // https://no-color.org: any non-empty value disables color.
                 let no_color = env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
                 if !is_tty || no_color {
@@ -58,15 +58,22 @@ fn depth(colorterm: &str, term: &str) -> ColorMode {
 }
 
 /// Render a line with escape sequences. Every styled span ends with a reset, so a
-/// line never leaks its style into the next one.
-pub fn render(line: &Line, mode: ColorMode) -> String {
+/// line never leaks its style into the next one. With `links`, spans that carry a
+/// link become OSC 8 hyperlinks.
+pub fn render(line: &Line, mode: ColorMode, links: Option<&[String]>) -> String {
     let mut out = String::new();
     for span in &line.spans {
-        if mode == ColorMode::None || span.style.is_plain() {
-            out.push_str(&span.text);
-            continue;
+        let link = links
+            .zip(span.style.link)
+            .and_then(|(links, i)| links.get(i as usize).map(|url| (i, url)));
+        if let Some((id, url)) = link {
+            out.push_str(&hyperlink_open(id, url));
         }
-        let sgr = sgr_params(&span.style, mode);
+        let sgr = if mode == ColorMode::None || span.style.is_plain() {
+            Vec::new()
+        } else {
+            sgr_params(&span.style, mode)
+        };
         if sgr.is_empty() {
             out.push_str(&span.text);
         } else {
@@ -76,8 +83,51 @@ pub fn render(line: &Line, mode: ColorMode) -> String {
             out.push_str(&span.text);
             out.push_str("\x1b[0m");
         }
+        if link.is_some() {
+            out.push_str(HYPERLINK_CLOSE);
+        }
     }
     out
+}
+
+const HYPERLINK_CLOSE: &str = "\x1b]8;;\x1b\\";
+
+/// OSC 8 start sequence. The id groups the pieces of a link that wraps across
+/// rows. Control characters are removed from the URL so a document cannot smuggle
+/// escape sequences into the terminal through a link.
+fn hyperlink_open(id: u32, url: &str) -> String {
+    let url: String = url.chars().filter(|c| !c.is_control()).collect();
+    format!("\x1b]8;id=mmore{id};{url}\x1b\\")
+}
+
+/// Whether the terminal is known to support OSC 8 hyperlinks. Unknown terminals
+/// get none, since some print the escape sequence as garbage.
+pub fn hyperlinks_supported() -> bool {
+    let var = |name: &str| env::var(name).unwrap_or_default();
+    if let Ok(force) = env::var("FORCE_HYPERLINK") {
+        return force != "0";
+    }
+    let term_program = var("TERM_PROGRAM");
+    let term = var("TERM");
+    let vte: u32 = var("VTE_VERSION").parse().unwrap_or(0);
+    vte >= 5000
+        || env::var_os("WT_SESSION").is_some()
+        || env::var_os("KONSOLE_VERSION").is_some()
+        || env::var_os("DOMTERM").is_some()
+        || matches!(
+            term_program.as_str(),
+            "iTerm.app"
+                | "WezTerm"
+                | "WarpTerminal"
+                | "vscode"
+                | "ghostty"
+                | "Hyper"
+                | "Tabby"
+                | "rio"
+        )
+        || ["kitty", "alacritty", "foot", "ghostty", "wezterm"]
+            .iter()
+            .any(|t| term.contains(t))
 }
 
 fn sgr_params(style: &Style, mode: ColorMode) -> Vec<String> {
@@ -207,24 +257,24 @@ mod tests {
 
     #[test]
     fn renders_each_depth() {
-        assert_eq!(render(&line(red()), ColorMode::None), "x");
+        assert_eq!(render(&line(red()), ColorMode::None, None), "x");
         assert_eq!(
-            render(&line(red()), ColorMode::TrueColor),
+            render(&line(red()), ColorMode::TrueColor, None),
             "\x1b[1;38;2;255;0;0mx\x1b[0m"
         );
         assert_eq!(
-            render(&line(red()), ColorMode::Ansi256),
+            render(&line(red()), ColorMode::Ansi256, None),
             "\x1b[1;38;5;196mx\x1b[0m"
         );
         assert_eq!(
-            render(&line(red()), ColorMode::Ansi16),
+            render(&line(red()), ColorMode::Ansi16, None),
             "\x1b[1;91mx\x1b[0m"
         );
     }
 
     #[test]
     fn plain_spans_have_no_escapes() {
-        assert_eq!(render(&Line::plain("hi"), ColorMode::TrueColor), "hi");
+        assert_eq!(render(&Line::plain("hi"), ColorMode::TrueColor, None), "hi");
     }
 
     #[test]
@@ -235,9 +285,24 @@ mod tests {
             ..Style::default()
         };
         assert_eq!(
-            render(&line(style), ColorMode::Ansi256),
+            render(&line(style), ColorMode::Ansi256, None),
             "\x1b[34;100mx\x1b[0m"
         );
+    }
+
+    #[test]
+    fn hyperlinks_wrap_linked_spans() {
+        let style = Style {
+            link: Some(0),
+            ..Style::default()
+        };
+        let links = vec!["https://x.io/\x1b[31m".to_string()];
+        assert_eq!(
+            render(&line(style), ColorMode::None, Some(&links)),
+            "\x1b]8;id=mmore0;https://x.io/[31m\x1b\\x\x1b]8;;\x1b\\"
+        );
+        // Without a link table the link is ignored.
+        assert_eq!(render(&line(style), ColorMode::None, None), "x");
     }
 
     #[test]

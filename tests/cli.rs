@@ -295,3 +295,88 @@ fn language_flag_renders_markdown_from_stdin() {
 fn width_must_be_reasonable() {
     mmore().args(["--width", "3", "x"]).assert().code(2);
 }
+
+const MD_EXT: &str = "tests/fixtures/markdown/extended.md";
+const OSC8: &str = "\x1b]8;";
+
+#[test]
+fn hyperlinks_always_emits_osc8_for_absolute_urls() {
+    mmore_env()
+        .args(["--color", "always", "--hyperlinks", "always", MD_EXT])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\x1b]8;id=mmore0;https://ci.example.com\x1b\\",
+        ))
+        // Relative image paths are not clickable.
+        .stdout(predicate::str::contains("docs/logo.png\x1b\\").not());
+}
+
+#[test]
+fn hyperlinks_auto_is_off_when_piped() {
+    mmore_env()
+        .env("TERM_PROGRAM", "iTerm.app")
+        .args(["--color", "always", MD_EXT])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(OSC8).not());
+}
+
+#[test]
+fn hyperlinks_never_overrides_force_env() {
+    mmore_env()
+        .env("FORCE_HYPERLINK", "1")
+        .args(["--color", "always", "--hyperlinks", "never", MD_EXT])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(OSC8).not());
+}
+
+/// Remove SGR color sequences.
+fn strip_sgr(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[test]
+fn ascii_flag_avoids_unicode_symbols() {
+    let out = mmore_env()
+        .args(["--color", "always", "--ascii", "--width", "60", MD_EXT])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = strip_sgr(&String::from_utf8(out.stdout).unwrap());
+    assert!(text.contains("  [x] Render tables"), "{text}");
+    assert!(text.contains("+-------+"), "{text}");
+    assert!(
+        !text.contains('☑') && !text.contains('┌') && !text.contains('•'),
+        "{text}"
+    );
+}
+
+#[test]
+fn front_matter_can_be_hidden() {
+    mmore_env()
+        .args(["--color", "always", MD_EXT])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("front matter (yaml)"));
+    mmore_env()
+        .args(["--color", "always", "--no-front-matter", MD_EXT])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("front matter").not())
+        .stdout(predicate::str::contains("title: Extended").not());
+}

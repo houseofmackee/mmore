@@ -19,6 +19,8 @@ pub struct Style {
     pub italic: bool,
     pub underline: bool,
     pub strike: bool,
+    /// Hyperlink target: an index into the document's link table.
+    pub link: Option<u32>,
 }
 
 impl Style {
@@ -128,6 +130,9 @@ pub fn markup(line: &Line) -> String {
         }
         if let Some(c) = s.bg {
             tags.push(format!("bg{}", color(c)));
+        }
+        if let Some(l) = s.link {
+            tags.push(format!("link{l}"));
         }
         if tags.is_empty() {
             out.push_str(&span.text);

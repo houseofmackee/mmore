@@ -13,9 +13,9 @@ checked.
 {b,fg4}Links{/}
 {fg4}────────────────────────────────────────────────────────────{/}
 
-See {u,fg4}the CommonMark spec{/}{dim} (https://spec.commonmark.org){/} or
-{u,fg4}https://example.com{/}. Jump to {u,fg4}the lists section{/} or mail
-{u,fg4}someone@example.com{/}.
+See {u,fg4,link0}the CommonMark spec{/}{dim,link0} (https://spec.commonmark.org){/} or
+{u,fg4,link1}https://example.com{/}. Jump to {u,fg4}the lists section{/} or mail
+{u,fg4,link2}someone@example.com{/}.
 
 {dim}### {/}{b,fg6}Lists{/}
 
@@ -40,10 +40,10 @@ See {u,fg4}the CommonMark spec{/}{dim} (https://spec.commonmark.org){/} or
 {b,fg4}Quotes{/}
 {fg4}────────────────────────────────────────────────────────────{/}
 
-{dim}│ {/}A block quote with {b}bold{/} text that is long enough to wrap
-{dim}│ {/}around.
+{dim}│{/} A block quote with {b}bold{/} text that is long enough to wrap
+{dim}│{/} around.
 {dim}│{/}
-{dim}│ │ {/}A nested quote.
+{dim}│{/} {dim}│{/} A nested quote.
 
 {b,fg4}Code{/}
 {fg4}────────────────────────────────────────────────────────────{/}
@@ -66,4 +66,4 @@ Line three after a br tag.
 
 {dim}<div align="center">raw html block</div>{/}
 
-{dim}[image: {/}logo{dim}]{/}
+{dim}▣ {/}{i}logo{/}{dim} (images/logo.png){/}

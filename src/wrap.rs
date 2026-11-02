@@ -12,6 +12,8 @@ pub struct Wrapped {
     pub rows: Vec<Line>,
     /// `source[i]` is the source line that produced `rows[i]`. Never decreases.
     pub source: Vec<usize>,
+    /// Hyperlink targets, indexed by `Style::link`.
+    pub links: Vec<String>,
 }
 
 impl Wrapped {
@@ -22,7 +24,10 @@ impl Wrapped {
 }
 
 pub fn wrap_all(rendered: &Rendered, width: usize) -> Wrapped {
-    let mut wrapped = Wrapped::default();
+    let mut wrapped = Wrapped {
+        links: rendered.links.clone(),
+        ..Wrapped::default()
+    };
     for (line, &source) in rendered.lines.iter().zip(&rendered.source) {
         for row in wrap_line(line, width) {
             wrapped.rows.push(row);
