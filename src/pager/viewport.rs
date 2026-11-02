@@ -59,6 +59,15 @@ impl Viewport {
         self.top = top.min(self.max_top());
     }
 
+    /// Scroll by `delta` rows (negative is up), clamped to the document.
+    pub fn scroll(&mut self, delta: isize) {
+        if delta >= 0 {
+            self.down(delta.unsigned_abs());
+        } else {
+            self.up(delta.unsigned_abs());
+        }
+    }
+
     fn down(&mut self, n: usize) {
         self.top = (self.top + n).min(self.max_top());
     }
@@ -116,6 +125,19 @@ mod tests {
     fn short_document_is_already_at_end() {
         let vp = Viewport::new(3, 10);
         assert!(vp.at_end());
+    }
+
+    #[test]
+    fn scroll_by_rows() {
+        let mut vp = Viewport::new(20, 10);
+        vp.scroll(3);
+        assert_eq!(vp.top, 3);
+        vp.scroll(100);
+        assert_eq!(vp.top, 10);
+        vp.scroll(-4);
+        assert_eq!(vp.top, 6);
+        vp.scroll(-100);
+        assert_eq!(vp.top, 0);
     }
 
     #[test]

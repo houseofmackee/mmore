@@ -14,6 +14,7 @@ const KEYS: &[(&str, &str)] = &[
     ("u  Ctrl-U", "Half a page up"),
     ("g  <  Home", "Go to the top"),
     ("G  >  End", "Go to the bottom"),
+    ("Mouse wheel", "Scroll 3 lines (needs --mouse)"),
     (
         "/pattern",
         "Search forward (regex; case-insensitive if all lowercase)",

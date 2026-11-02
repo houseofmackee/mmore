@@ -14,7 +14,9 @@ use std::io::{self, BufWriter, Write};
 use std::time::Duration;
 
 use crossterm::cursor::{self, MoveTo};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use crossterm::queue;
 use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::terminal::{self, Clear, ClearType};
@@ -36,6 +38,8 @@ pub struct Options {
     pub color: ColorMode,
     /// Emit OSC 8 hyperlinks.
     pub hyperlinks: bool,
+    /// Report mouse buttons so the wheel scrolls.
+    pub mouse: bool,
 }
 
 /// Page the document interactively until the user quits.
@@ -44,7 +48,7 @@ pub fn run(document: &Document, opts: &Options) -> io::Result<()> {
         return Ok(());
     }
     document.start_highlighting();
-    let _screen = Screen::enter()?;
+    let _screen = Screen::enter(opts.mouse)?;
     let mut out = BufWriter::new(io::stdout());
     let (cols, rows) = terminal::size()?;
     let mut pager = Pager::new(document, opts, cols, rows);
@@ -77,6 +81,7 @@ pub fn run(document: &Document, opts: &Options) -> io::Result<()> {
                 }
                 dirty = true;
             }
+            Some(Event::Mouse(mouse)) => dirty = pager.mouse(mouse.kind),
             Some(Event::Resize(..)) => {
                 // Query again: the size in the event can be stale during a drag.
                 let (cols, rows) = terminal::size()?;
@@ -92,6 +97,8 @@ pub fn run(document: &Document, opts: &Options) -> io::Result<()> {
 /// How long to wait for the first screen to be highlighted before showing it
 /// plain. Small files are done by then; big files do not keep you waiting.
 const FIRST_SCREEN_WAIT: Duration = Duration::from_millis(50);
+/// Rows scrolled per wheel notch.
+const WHEEL_ROWS: isize = 3;
 /// How often to check for newly highlighted lines while highlighting runs.
 const HIGHLIGHT_POLL: Duration = Duration::from_millis(25);
 
@@ -291,6 +298,30 @@ impl<'a> Pager<'a> {
             }
         }
         Flow::Continue
+    }
+
+    /// Scroll on mouse wheel turns. Returns whether the screen needs a redraw.
+    fn mouse(&mut self, kind: MouseEventKind) -> bool {
+        let delta = match kind {
+            MouseEventKind::ScrollDown => WHEEL_ROWS,
+            MouseEventKind::ScrollUp => -WHEEL_ROWS,
+            _ => return false,
+        };
+        // Leave a prompt being typed alone.
+        if self.prompt.is_some() {
+            return false;
+        }
+        let vp = match &mut self.help {
+            Some(help) => &mut help.vp,
+            None => &mut self.view.vp,
+        };
+        let before = vp.top;
+        vp.scroll(delta);
+        let moved = vp.top != before;
+        if moved {
+            self.message = None;
+        }
+        moved
     }
 
     fn prompt_key(&mut self, kind: PromptKind, mut input: String, key: KeyEvent) -> Flow {
@@ -635,6 +666,7 @@ mod tests {
         exit_at_eof: false,
         color: ColorMode::None,
         hyperlinks: false,
+        mouse: false,
     };
 
     fn press(p: &mut Pager, keys: &str) -> Flow {
@@ -912,6 +944,31 @@ mod tests {
         let mut p = p;
         press(&mut p, "m");
         assert!(!screen(&p).contains("38;2;"));
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls() {
+        let d = doc(&[("a.txt", &numbered(50)), ("b.txt", "x\n")]);
+        let mut p = Pager::new(&d, &OPTS, 80, 10);
+        assert!(p.mouse(MouseEventKind::ScrollDown));
+        assert_eq!(top_text(&p), "line 4");
+        assert!(p.mouse(MouseEventKind::ScrollUp));
+        assert_eq!(top_text(&p), "line 1");
+        // Nothing to do at the top, or for other mouse events.
+        assert!(!p.mouse(MouseEventKind::ScrollUp));
+        assert!(!p.mouse(MouseEventKind::Moved));
+        // The wheel never switches files at the end.
+        press(&mut p, "G");
+        assert!(!p.mouse(MouseEventKind::ScrollDown));
+        assert_eq!(p.file, 0);
+        // It scrolls the help screen while that is open, and not a typed prompt.
+        press(&mut p, "gh");
+        p.mouse(MouseEventKind::ScrollDown);
+        assert_eq!(p.help.as_ref().unwrap().vp.top, 3);
+        assert_eq!(top_text(&p), "line 1");
+        press(&mut p, "q/abc");
+        assert!(!p.mouse(MouseEventKind::ScrollDown));
+        assert_eq!(top_text(&p), "line 1");
     }
 
     #[test]

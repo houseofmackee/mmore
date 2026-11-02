@@ -48,6 +48,7 @@ somewhere else, add `--root DIR` (the binary goes in `DIR/bin`).
 | `k`, `Up` | Previous line |
 | `d` / `u` | Half a page down / up |
 | `g`, `Home` / `G`, `End` | Top / bottom |
+| Mouse wheel | Scroll 3 lines (with `--mouse`) |
 | `/pattern`, `?pattern` | Search forward / backward |
 | `n` / `N` | Next / previous match |
 | `Esc` | Clear search highlighting |
@@ -75,6 +76,7 @@ uppercase letter. An empty pattern repeats the previous search.
 | `--no-front-matter` | Hide YAML or TOML front matter |
 | `-e`, `--exit-at-eof` | Quit when paging past the end, like classic `more` |
 | `--no-pager`, `--always-page` | Never page, or page even short input |
+| `--mouse` | Scroll with the mouse wheel (see below) |
 | `--force` | Show binary files anyway |
 
 Run `mmore --help` for the full list.
@@ -89,6 +91,16 @@ export MMORE_OPTS='-n --theme "Solarized (dark)"'
 mmore notes.md                    # line numbers, Solarized
 mmore --theme InspiredGitHub x.rs # line numbers, InspiredGitHub
 ```
+
+### Mouse wheel
+
+With `--mouse`, the wheel scrolls three lines at a time. The terminal then sends
+mouse clicks to `mmore` instead of selecting text, so it is off by default. To
+select text while it is on, drag while holding Shift in most terminals (Option in
+iTerm2). To turn it on for good, add it to `MMORE_OPTS`.
+
+Some terminals scroll pagers with the wheel even without `--mouse`, by turning
+wheel turns into arrow keys. In those, text selection keeps working as usual.
 
 ## Colors and themes
 

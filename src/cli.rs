@@ -131,6 +131,11 @@ pub struct Cli {
     #[arg(long)]
     pub no_front_matter: bool,
 
+    /// Scroll with the mouse wheel. The terminal then sends clicks to mmore; to
+    /// select text, drag while holding Shift in most terminals (Option in iTerm2).
+    #[arg(long)]
+    pub mouse: bool,
+
     /// Display binary files anyway.
     #[arg(long)]
     pub force: bool,

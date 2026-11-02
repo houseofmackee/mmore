@@ -217,6 +217,7 @@ fn output(
             exit_at_eof: cli.exit_at_eof,
             color,
             hyperlinks,
+            mouse: cli.mouse,
         },
     )
 }
