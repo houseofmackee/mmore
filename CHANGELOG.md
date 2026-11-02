@@ -5,6 +5,8 @@ section here, so a version can only be released once it has one.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-02
+
 ### Added
 
 - `]` and `[` jump to the next and previous heading in Markdown, and `t` opens a
@@ -15,7 +17,6 @@ section here, so a version can only be released once it has one.
 - Marks, as in `less`: `m` and a letter marks the current place (in any file),
   `'` and the letter goes back to it, and `''` returns to where you were before
   the last jump (`g`, `G`, `%`, a search, a heading, or a mark).
-
 - Search as you type: while typing after `/` or `?`, the view jumps to the first
   match and highlights all of them; Enter keeps the search, Esc goes back.
 
@@ -71,6 +72,7 @@ First release.
 - Light or dark theme picked from the terminal's background.
 - Builds for macOS and Linux, and a Homebrew formula.
 
-[Unreleased]: https://github.com/houseofmackee/mmore/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/mmore/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/houseofmackee/mmore/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/houseofmackee/mmore/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/houseofmackee/mmore/releases/tag/v0.1.0
