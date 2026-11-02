@@ -248,8 +248,8 @@ Environment: `MMORE_OPTS` (default flags, parsed before argv), `NO_COLOR`, `COLO
    README, release builds (`cargo install`, Homebrew tap).
 
 **Status (2026-11-02):** milestones 1 to 7 are done, except the Homebrew tap, which
-needs a published repository. Added since: mouse wheel scrolling (`--mouse`). Not yet
-done from the plan: the config file (`~/.config/mmore/config.toml`) and CI.
+needs a published repository. Added since: mouse wheel scrolling (`--mouse`) and CI on
+GitHub Actions. Not yet done from the plan: the config file (`~/.config/mmore/config.toml`).
 
 ## 11. Risks and open questions
 

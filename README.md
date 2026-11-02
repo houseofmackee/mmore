@@ -1,5 +1,7 @@
 # mmore
 
+[![CI](https://github.com/houseofmackee/mmore/actions/workflows/ci.yml/badge.svg)](https://github.com/houseofmackee/mmore/actions/workflows/ci.yml)
+
 `mmore` is a terminal pager in the spirit of `more`. It pages plain text like
 `more` does, renders Markdown files as formatted text, and syntax-highlights source
 code.
@@ -136,6 +138,9 @@ expected. Add `--color always` to get rendered, colored output anyway.
 cargo test      # unit, snapshot, and command-line tests
 cargo clippy --all-targets -- -D warnings
 ```
+
+GitHub Actions runs formatting, clippy, and the tests on Linux and macOS for every
+push to `main` and every pull request (`.github/workflows/ci.yml`).
 
 Markdown rendering has snapshot tests (using `insta`) over the documents in
 `tests/fixtures/markdown`. After an intended change to the output, review and
