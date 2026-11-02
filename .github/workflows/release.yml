@@ -1,0 +1,178 @@
+name: Release
+
+# Builds and publishes a release when a version tag is pushed:
+#   git tag v0.1.0 && git push origin v0.1.0
+# The tag must match the version in Cargo.toml.
+#
+# Binaries are built for macOS (Apple silicon and Intel) and Linux (x86_64 and
+# ARM, statically linked with musl so they run on any distribution), published
+# with a SHA256SUMS.txt, and the Homebrew formula in houseofmackee/homebrew-tap is
+# updated to the new release.
+#
+# Secrets:
+#   TAP_DEPLOY_KEY   a write deploy key of houseofmackee/homebrew-tap, so the
+#                    formula follows each release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check that the tag matches Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Smoke test
+        run: |
+          bin=target/${{ matrix.target }}/release/mmore
+          "$bin" --version
+          printf '# Title\n\nSome *text*.\n' | "$bin" -l md --color always --width 40 | grep -q 'Title'
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          name="mmore-$version-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp target/${{ matrix.target }}/release/mmore README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes="$RUNNER_TEMP/notes.md"
+          cat > "$notes" <<NOTES
+          Install with Homebrew (macOS and Linux): \`brew install houseofmackee/tap/mmore\`
+
+          Or download the archive for your platform, check it against \`SHA256SUMS.txt\`, and put \`mmore\` on your PATH. Linux binaries are statically linked and run on any distribution.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --generate-notes --notes-file "$notes" \
+            --title "mmore $version" dist/*.tar.gz dist/SHA256SUMS.txt
+
+      - name: Update the Homebrew formula
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+        run: |
+          if [ -z "$TAP_DEPLOY_KEY" ]; then
+            echo "::warning::TAP_DEPLOY_KEY is not set; houseofmackee/homebrew-tap was not updated"
+            exit 0
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          sha() { awk -v f="mmore-$version-$1.tar.gz" '$2 == f {print $1}' dist/SHA256SUMS.txt; }
+          base="https://github.com/houseofmackee/mmore/releases/download/v$version"
+          key="$RUNNER_TEMP/tap_key"
+          printf '%s\n' "$TAP_DEPLOY_KEY" > "$key"
+          chmod 600 "$key"
+          # GitHub's published host key (docs.github.com, "GitHub's SSH key fingerprints").
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
+          git clone -q git@github.com:houseofmackee/homebrew-tap.git "$RUNNER_TEMP/tap"
+          mkdir -p "$RUNNER_TEMP/tap/Formula"
+          cat > "$RUNNER_TEMP/tap/Formula/mmore.rb" <<FORMULA
+          class Mmore < Formula
+            desc "Pager like more, with Markdown rendering and syntax highlighting"
+            homepage "https://github.com/houseofmackee/mmore"
+            license any_of: ["MIT", "Apache-2.0"]
+
+            on_macos do
+              on_arm do
+                url "$base/mmore-$version-aarch64-apple-darwin.tar.gz"
+                sha256 "$(sha aarch64-apple-darwin)"
+              end
+              on_intel do
+                url "$base/mmore-$version-x86_64-apple-darwin.tar.gz"
+                sha256 "$(sha x86_64-apple-darwin)"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "$base/mmore-$version-aarch64-unknown-linux-musl.tar.gz"
+                sha256 "$(sha aarch64-unknown-linux-musl)"
+              end
+              on_intel do
+                url "$base/mmore-$version-x86_64-unknown-linux-musl.tar.gz"
+                sha256 "$(sha x86_64-unknown-linux-musl)"
+              end
+            end
+
+            def install
+              bin.install "mmore"
+            end
+
+            test do
+              assert_match "mmore #{version}", shell_output("#{bin}/mmore --version")
+              (testpath/"hello.md").write("# Hello\n")
+              # Output that is not a terminal is passed through unchanged.
+              assert_equal "# Hello\n", shell_output("#{bin}/mmore #{testpath}/hello.md")
+            end
+          end
+          FORMULA
+          cd "$RUNNER_TEMP/tap"
+          git add Formula/mmore.rb
+          if git diff --cached --quiet; then
+            echo "the formula is already at $version"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "mmore $version"
+          git push -q origin HEAD
+
+      - name: Remove the key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/tap_key" "$RUNNER_TEMP/known_hosts"

@@ -15,7 +15,20 @@ mmore -n a.txt b.txt     # several files, with line numbers
 
 ## Install
 
-You need a Rust toolchain (`cargo`). From a checkout of this repository:
+With [Homebrew](https://brew.sh), on macOS or Linux:
+
+```sh
+brew install houseofmackee/tap/mmore
+```
+
+Or download the archive for your platform from the
+[latest release](https://github.com/houseofmackee/mmore/releases/latest), check it
+against `SHA256SUMS.txt`, and put `mmore` somewhere on your `PATH`. There are
+builds for macOS (Apple silicon and Intel) and Linux (x86_64 and ARM); the Linux
+ones are statically linked and run on any distribution.
+
+To build it yourself, you need a Rust toolchain (`cargo`). From a checkout of this
+repository:
 
 ```sh
 cargo install --path .
@@ -165,6 +178,19 @@ cargo build && python3 tests/pty/terminal_checks.py
 GitHub Actions runs formatting, clippy, the tests, and the terminal checks on Linux
 and macOS for every push to `main` and every pull request
 (`.github/workflows/ci.yml`).
+
+### Releasing
+
+Set the version in `Cargo.toml`, commit, and push a matching tag:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+`.github/workflows/release.yml` then builds the four binaries, publishes them with
+checksums as a GitHub release, and updates the formula in
+[houseofmackee/homebrew-tap](https://github.com/houseofmackee/homebrew-tap). The
+tap update needs the `TAP_DEPLOY_KEY` secret (a write deploy key of the tap).
 
 Markdown rendering has snapshot tests (using `insta`) over the documents in
 `tests/fixtures/markdown`. After an intended change to the output, review and
