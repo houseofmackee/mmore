@@ -13,6 +13,8 @@ use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::terminal::{self, Clear, ClearType};
 use unicode_width::UnicodeWidthStr;
 
+use crate::ansi::{self, ColorMode};
+use crate::style::Line;
 use crate::wrap::{Wrapped, wrap_all};
 use keys::Action;
 use screen::Screen;
@@ -21,10 +23,11 @@ use viewport::Viewport;
 pub struct Options {
     /// Quit when moving forward while the last page is already shown (classic `more`).
     pub exit_at_eof: bool,
+    pub color: ColorMode,
 }
 
 /// Page `lines` interactively until the user quits.
-pub fn run(lines: &[String], opts: &Options) -> io::Result<()> {
+pub fn run(lines: &[Line], opts: &Options) -> io::Result<()> {
     let _screen = Screen::enter()?;
     let mut out = BufWriter::new(io::stdout());
 
@@ -33,7 +36,7 @@ pub fn run(lines: &[String], opts: &Options) -> io::Result<()> {
     let mut vp = Viewport::new(wrapped.rows.len(), content_height(rows));
 
     loop {
-        draw(&mut out, &wrapped, &vp, cols)?;
+        draw(&mut out, &wrapped, &vp, cols, opts.color)?;
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 let action = keys::map(key);
@@ -65,12 +68,18 @@ fn content_height(rows: u16) -> usize {
     (rows as usize).saturating_sub(1).max(1)
 }
 
-fn draw(out: &mut impl Write, wrapped: &Wrapped, vp: &Viewport, cols: u16) -> io::Result<()> {
+fn draw(
+    out: &mut impl Write,
+    wrapped: &Wrapped,
+    vp: &Viewport,
+    cols: u16,
+    color: ColorMode,
+) -> io::Result<()> {
     for i in 0..vp.height {
         // Clear before printing: clearing after a full-width row would erase its last cell.
         queue!(out, MoveTo(0, i as u16), Clear(ClearType::CurrentLine))?;
         if let Some(row) = wrapped.rows.get(vp.top + i) {
-            queue!(out, Print(row))?;
+            queue!(out, Print(ansi::render(row, color)))?;
         }
     }
 
@@ -114,8 +123,8 @@ fn truncate(s: &str, max_width: usize) -> &str {
 mod tests {
     use super::*;
 
-    fn lines(n: usize) -> Vec<String> {
-        (1..=n).map(|i| format!("line {i}")).collect()
+    fn lines(n: usize) -> Vec<Line> {
+        (1..=n).map(|i| Line::plain(format!("line {i}"))).collect()
     }
 
     #[test]
@@ -139,7 +148,7 @@ mod tests {
         let mut vp = Viewport::new(wrapped.rows.len(), 10);
         vp.apply(Action::PageDown);
         let mut buf = Vec::new();
-        draw(&mut buf, &wrapped, &vp, 80).unwrap();
+        draw(&mut buf, &wrapped, &vp, 80, ColorMode::None).unwrap();
         let screen = String::from_utf8(buf).unwrap();
         assert!(screen.contains("line 11"));
         assert!(screen.contains("line 20"));

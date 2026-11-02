@@ -83,3 +83,147 @@ fn force_shows_binary_file() {
         .success()
         .stdout("BIN^@^A^Bdata\n");
 }
+
+const ESC: &str = "\x1b[";
+
+/// Run with a predictable terminal environment.
+fn mmore_env() -> Command {
+    let mut cmd = mmore();
+    cmd.env_remove("NO_COLOR")
+        .env_remove("COLORTERM")
+        .env_remove("COLORFGBG")
+        .env("TERM", "xterm-256color");
+    cmd
+}
+
+#[test]
+fn piped_output_has_no_colors_by_default() {
+    mmore_env()
+        .arg("tests/fixtures/hello.rs")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(ESC).not())
+        .stdout(predicate::str::contains("let greeting = \"hello\";"));
+}
+
+#[test]
+fn color_always_highlights_code_in_256_colors() {
+    mmore_env()
+        .args(["--color", "always", "tests/fixtures/hello.rs"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("38;5;"));
+}
+
+#[test]
+fn truecolor_when_colorterm_says_so() {
+    mmore_env()
+        .env("COLORTERM", "truecolor")
+        .args(["--color", "always", "tests/fixtures/hello.rs"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("38;2;"));
+}
+
+#[test]
+fn explicit_color_always_overrides_no_color() {
+    mmore_env()
+        .env("NO_COLOR", "1")
+        .args(["--color", "always", "tests/fixtures/hello.rs"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(ESC));
+}
+
+#[test]
+fn plain_flag_disables_highlighting() {
+    mmore_env()
+        .args(["--plain", "--color", "always", "tests/fixtures/hello.rs"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(ESC).not());
+}
+
+#[test]
+fn language_flag_highlights_stdin() {
+    mmore_env()
+        .args(["-l", "python", "--color", "always"])
+        .write_stdin("def f():\n    return 1\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(ESC));
+}
+
+#[test]
+fn shebang_detects_language_on_stdin() {
+    mmore_env()
+        .args(["--color", "always"])
+        .write_stdin("#!/usr/bin/env python3\nimport os\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(ESC));
+}
+
+#[test]
+fn unknown_text_stays_plain_even_with_color() {
+    mmore_env()
+        .args(["--color", "always", "tests/fixtures/hello.txt"])
+        .assert()
+        .success()
+        .stdout("hello\nworld\n");
+}
+
+#[test]
+fn unknown_theme_is_an_error() {
+    mmore()
+        .args(["--theme", "nope", "tests/fixtures/hello.rs"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unknown theme 'nope'"));
+}
+
+#[test]
+fn unknown_language_is_an_error() {
+    mmore()
+        .args(["-l", "klingon", "tests/fixtures/hello.rs"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unknown language 'klingon'"));
+}
+
+#[test]
+fn list_themes_and_languages() {
+    mmore_env()
+        .arg("--list-themes")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("base16-ocean.dark (default)"))
+        .stdout(predicate::str::contains("InspiredGitHub"));
+    mmore()
+        .arg("--list-languages")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Rust: rs"))
+        .stdout(predicate::str::contains("Python: py"));
+}
+
+#[test]
+fn other_theme_changes_colors() {
+    let dark = mmore_env()
+        .args(["--color", "always", "tests/fixtures/hello.rs"])
+        .output()
+        .unwrap()
+        .stdout;
+    let light = mmore_env()
+        .args([
+            "--color",
+            "always",
+            "--theme",
+            "InspiredGitHub",
+            "tests/fixtures/hello.rs",
+        ])
+        .output()
+        .unwrap()
+        .stdout;
+    assert_ne!(dark, light);
+}

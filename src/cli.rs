@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
+use crate::ansi::ColorWhen;
+
 /// A pager like `more`, with Markdown rendering and syntax highlighting.
 #[derive(Debug, Parser)]
 #[command(name = "mmore", version, about)]
@@ -9,6 +11,30 @@ pub struct Cli {
     /// Files to display. Use `-` for stdin. Reads stdin when no files are given.
     #[arg(value_name = "FILE")]
     pub files: Vec<PathBuf>,
+
+    /// Disable Markdown rendering and syntax highlighting.
+    #[arg(short, long, conflicts_with = "language")]
+    pub plain: bool,
+
+    /// Force a language, by name or extension (e.g. rust, py, markdown).
+    #[arg(short, long, value_name = "LANG")]
+    pub language: Option<String>,
+
+    /// Syntax highlighting theme (see --list-themes).
+    #[arg(long, value_name = "NAME")]
+    pub theme: Option<String>,
+
+    /// List available themes and exit.
+    #[arg(long)]
+    pub list_themes: bool,
+
+    /// List supported languages and exit.
+    #[arg(long)]
+    pub list_languages: bool,
+
+    /// When to use colors.
+    #[arg(long, value_enum, value_name = "WHEN", default_value_t = ColorWhen::Auto)]
+    pub color: ColorWhen,
 
     /// Display binary files anyway.
     #[arg(long)]

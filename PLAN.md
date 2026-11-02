@@ -139,12 +139,14 @@ Walk the `pulldown-cmark` event stream with a style stack and a block-context st
   TOML, Markdown, Makefile, Dockerfile, and more).
 - Optionally add a few extra `.sublime-syntax` files (TypeScript, TOML, Dockerfile if
   missing) compiled into a binary dump at build time via `build.rs`, so startup does not
-  pay for parsing. Defer this until v1 works.
+  pay for parsing. Defer this until v1 works. Meanwhile, missing languages map to the
+  closest bundled one (TypeScript to JavaScript, TOML to Java Properties, Kotlin to Java).
 - Themes: default `base16-ocean.dark`; detect light backgrounds through `COLORFGBG` or an
   OSC 11 query (best effort, with timeout) and pick a light theme. `--theme NAME` and
   `--list-themes` flags.
 - Highlight lazily for large files: highlight from the top up to the current viewport plus
-  a margin, since syntect state must be carried forward line by line.
+  a margin, since syntect state must be carried forward line by line. Until then (milestone 7),
+  inputs over 256 KiB or with lines over 20,000 bytes are shown as plain text.
 - Map syntect colors to our `Style`, then downgrade color depth according to
   `COLORTERM` / `TERM`.
 
