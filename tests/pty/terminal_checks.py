@@ -208,6 +208,39 @@ def early_key(cmd, key, delay, rows=10, cols=80):
     return out.decode(errors="replace")
 
 
+def quit_while_reading(cmd, ready, rows=10, cols=40):
+    """Wait until the pager shows `ready`, press q, and return how many seconds
+    it took to give the terminal back (None if it did not within 5 s). The
+    producer is killed afterwards, so it may run as long as it likes."""
+    pid, fd = spawn(cmd, clean_env(), rows, cols)
+    out = b""
+    start = time.time()
+    pressed = None
+    took = None
+    while time.time() - start < 20:
+        r, _, _ = select.select([fd], [], [], 0.01)
+        if r:
+            try:
+                out += os.read(fd, 65536)
+            except OSError:
+                break
+        if pressed is None and ready.encode() in out:
+            os.write(fd, b"q")
+            pressed = time.time()
+        if pressed is not None:
+            if ALT_OFF.encode() in out[out.find(ready.encode()):]:
+                took = time.time() - pressed
+                break
+            if time.time() - pressed > 5:
+                break
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    os.waitpid(pid, 0)
+    return took
+
+
 def answering_terminal(reply, env=None):
     """Run mmore on a terminal that answers the OSC 11 query with `reply`.
 
@@ -502,9 +535,9 @@ def streaming():
     check("later input appears, then the status shows a percentage", "--More--(" in later and code == 0)
 
     # A producer that is still running (like tail -f): quitting must not wait for
-    # it. The screen is restored right after q, while the producer still sleeps.
-    out, code, snaps = run(f"(seq 1 3; sleep 4) | {BIN}", ["q"], rows=10, cols=40)
-    check("q quits while input is still open", ALT_OFF in after(snaps, 0) and code == 0)
+    # it. q is pressed once the pager is up; the producer has 30 s left.
+    took = quit_while_reading(f"(seq 1 3; sleep 30) | {BIN}", "(waiting for input)")
+    check("q quits while input is still open", took is not None, "never" if took is None else f"{took:.2f}s")
 
     # F follows new input at the end.
     follow = f"(seq 1 20; sleep 1; seq 21 60; sleep 4) | {BIN}"
