@@ -12,7 +12,8 @@ pub struct Cli {
     #[arg(value_name = "FILE")]
     pub files: Vec<PathBuf>,
 
-    /// Disable Markdown rendering and syntax highlighting.
+    /// Disable Markdown rendering and syntax highlighting. (Output that is piped
+    /// elsewhere is always shown as is, unless --color=always is given.)
     #[arg(short, long, conflicts_with = "language")]
     pub plain: bool,
 
@@ -31,6 +32,14 @@ pub struct Cli {
     /// List supported languages and exit.
     #[arg(long)]
     pub list_languages: bool,
+
+    /// Render width, instead of the terminal width.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(10..))]
+    pub width: Option<u16>,
+
+    /// Maximum width of rendered Markdown.
+    #[arg(long, value_name = "N", default_value_t = 100, value_parser = clap::value_parser!(u16).range(10..))]
+    pub max_width: u16,
 
     /// When to use colors.
     #[arg(long, value_enum, value_name = "WHEN", default_value_t = ColorWhen::Auto)]

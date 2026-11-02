@@ -1,0 +1,69 @@
+---
+source: src/render/markdown.rs
+expression: "marked(md, 60)"
+---
+{b,fg5}mmore Sample Document{/}
+{fg5}════════════════════════════════════════════════════════════{/}
+
+This paragraph has {i}emphasis{/}, {b}strong text{/}, {b,i}both{/},
+{s}strikethrough{/}, and {fg1}inline code{/}. It is long enough that it
+needs to wrap at narrow widths, so the word wrapping can be
+checked.
+
+{b,fg4}Links{/}
+{fg4}────────────────────────────────────────────────────────────{/}
+
+See {u,fg4}the CommonMark spec{/}{dim} (https://spec.commonmark.org){/} or
+{u,fg4}https://example.com{/}. Jump to {u,fg4}the lists section{/} or mail
+{u,fg4}someone@example.com{/}.
+
+{dim}### {/}{b,fg6}Lists{/}
+
+{fg6}  • {/}First item
+{fg6}  • {/}Second item with a longer description that wraps onto
+    another line
+    {fg6}  ◦ {/}Nested item
+        {fg6}  ▪ {/}Deeper item
+{fg6}  • {/}Third item
+
+{fg6}  1. {/}Step one
+{fg6}  2. {/}Step two
+     {fg6}  1. {/}Sub-step
+{fg6}  3. {/}Step three
+
+{dim}#### {/}{b}Loose list{/}
+
+{fg6}  • {/}Paragraph item one
+
+{fg6}  • {/}Paragraph item two
+
+{b,fg4}Quotes{/}
+{fg4}────────────────────────────────────────────────────────────{/}
+
+{dim}│ {/}A block quote with {b}bold{/} text that is long enough to wrap
+{dim}│ {/}around.
+{dim}│{/}
+{dim}│ │ {/}A nested quote.
+
+{b,fg4}Code{/}
+{fg4}────────────────────────────────────────────────────────────{/}
+
+{dim}┌─ {/}{dim,i}rust{/}
+{dim}│ {/}fn main() {
+{dim}│ {/}        println!("Hello, {}!", "world");
+{dim}│ {/}}
+{dim}└─{/}
+
+{dim}┌─{/}
+{dim}│ {/}indented code block
+{dim}└─{/}
+
+{dim}────────────────────────────────────────────────────────────{/}
+
+Line one with a hard break
+line two.
+Line three after a br tag.
+
+{dim}<div align="center">raw html block</div>{/}
+
+{dim}[image: {/}logo{dim}]{/}

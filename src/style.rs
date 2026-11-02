@@ -4,8 +4,6 @@ use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
-    // Used by the Markdown renderer (milestone 4).
-    #[allow(dead_code)]
     /// One of the 16 terminal palette colors (0 to 15). Follows the user's terminal theme.
     Ansi(u8),
     /// An exact color, downgraded to the terminal's color depth on output.
@@ -72,10 +70,29 @@ impl Line {
         }
     }
 
-    /// The text without styling. Used by tests now, and by search (milestone 6).
-    #[allow(dead_code)]
+    /// The text without styling.
     pub fn text(&self) -> String {
         self.spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    /// Append all spans of `other`.
+    pub fn append(&mut self, other: Line) {
+        for span in other.spans {
+            self.push(&span.text, span.style);
+        }
+    }
+
+    /// Remove trailing whitespace.
+    pub fn trim_end(&mut self) {
+        while let Some(last) = self.spans.last_mut() {
+            let len = last.text.trim_end().len();
+            if len == 0 {
+                self.spans.pop();
+            } else {
+                last.text.truncate(len);
+                break;
+            }
+        }
     }
 
     /// Display width in terminal columns.
@@ -84,9 +101,57 @@ impl Line {
     }
 }
 
+/// Readable markup for tests: `{b,fg5}text{/}` for styled spans, plain text otherwise.
+#[cfg(test)]
+pub fn markup(line: &Line) -> String {
+    let mut out = String::new();
+    for span in &line.spans {
+        let s = &span.style;
+        let mut tags = Vec::new();
+        for (on, tag) in [
+            (s.bold, "b"),
+            (s.dim, "dim"),
+            (s.italic, "i"),
+            (s.underline, "u"),
+            (s.strike, "s"),
+        ] {
+            if on {
+                tags.push(tag.to_string());
+            }
+        }
+        let color = |c: Color| match c {
+            Color::Ansi(n) => n.to_string(),
+            Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+        };
+        if let Some(c) = s.fg {
+            tags.push(format!("fg{}", color(c)));
+        }
+        if let Some(c) = s.bg {
+            tags.push(format!("bg{}", color(c)));
+        }
+        if tags.is_empty() {
+            out.push_str(&span.text);
+        } else {
+            out.push_str(&format!("{{{}}}{}{{/}}", tags.join(","), span.text));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn append_and_trim() {
+        let mut line = Line::plain("a ");
+        line.append(Line::plain("b  "));
+        line.trim_end();
+        assert_eq!(line.text(), "a b");
+        let mut blank = Line::plain("   ");
+        blank.trim_end();
+        assert!(blank.spans.is_empty());
+    }
 
     #[test]
     fn push_merges_equal_styles() {

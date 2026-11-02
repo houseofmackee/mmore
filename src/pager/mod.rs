@@ -14,7 +14,7 @@ use crossterm::terminal::{self, Clear, ClearType};
 use unicode_width::UnicodeWidthStr;
 
 use crate::ansi::{self, ColorMode};
-use crate::style::Line;
+use crate::document::Document;
 use crate::wrap::{Wrapped, wrap_all};
 use keys::Action;
 use screen::Screen;
@@ -26,13 +26,14 @@ pub struct Options {
     pub color: ColorMode,
 }
 
-/// Page `lines` interactively until the user quits.
-pub fn run(lines: &[Line], opts: &Options) -> io::Result<()> {
+/// Page the document interactively until the user quits.
+pub fn run(document: &Document, opts: &Options) -> io::Result<()> {
     let _screen = Screen::enter()?;
     let mut out = BufWriter::new(io::stdout());
 
     let (mut cols, rows) = terminal::size()?;
-    let mut wrapped = wrap_all(lines, cols as usize);
+    let layout = |cols: u16| wrap_all(&document.render(cols as usize), cols as usize);
+    let mut wrapped = layout(cols);
     let mut vp = Viewport::new(wrapped.rows.len(), content_height(rows));
 
     loop {
@@ -53,7 +54,7 @@ pub fn run(lines: &[Line], opts: &Options) -> io::Result<()> {
                 let anchor = wrapped.source.get(vp.top).copied().unwrap_or(0);
                 if new_cols != cols {
                     cols = new_cols;
-                    wrapped = wrap_all(lines, cols as usize);
+                    wrapped = layout(cols);
                 }
                 let top = wrapped.first_row_of(anchor);
                 vp.reset(wrapped.rows.len(), content_height(new_rows), top);
@@ -122,9 +123,15 @@ fn truncate(s: &str, max_width: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::Rendered;
+    use crate::style::Line;
 
-    fn lines(n: usize) -> Vec<Line> {
-        (1..=n).map(|i| Line::plain(format!("line {i}"))).collect()
+    fn lines(n: usize) -> Rendered {
+        let mut r = Rendered::default();
+        for i in 1..=n {
+            r.push(Line::plain(format!("line {i}")), i);
+        }
+        r
     }
 
     #[test]

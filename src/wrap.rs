@@ -1,33 +1,32 @@
-//! Width-aware line wrapping of styled lines.
-//!
-//! For now this hard-wraps at the terminal width (like a terminal would on its
-//! own). Word wrapping for Markdown prose will build on top of this.
+//! Width-aware wrapping of styled lines: hard wrapping for display, and word
+//! wrapping for Markdown prose.
 
 use unicode_width::UnicodeWidthChar;
 
-use crate::style::Line;
+use crate::render::Rendered;
+use crate::style::{Line, Span, Style};
 
-/// Lines wrapped to a fixed width, remembering which source line each row came from.
+/// Rows wrapped to a fixed width, remembering which source line each row came from.
 #[derive(Debug, Default)]
 pub struct Wrapped {
     pub rows: Vec<Line>,
-    /// `source[i]` is the index of the input line that produced `rows[i]`.
+    /// `source[i]` is the source line that produced `rows[i]`. Never decreases.
     pub source: Vec<usize>,
 }
 
 impl Wrapped {
-    /// First row produced by source line `line`, or the closest row before it.
+    /// First row produced by source line `line`, or the closest row after it.
     pub fn first_row_of(&self, line: usize) -> usize {
         self.source.partition_point(|&s| s < line)
     }
 }
 
-pub fn wrap_all(lines: &[Line], width: usize) -> Wrapped {
+pub fn wrap_all(rendered: &Rendered, width: usize) -> Wrapped {
     let mut wrapped = Wrapped::default();
-    for (i, line) in lines.iter().enumerate() {
+    for (line, &source) in rendered.lines.iter().zip(&rendered.source) {
         for row in wrap_line(line, width) {
             wrapped.rows.push(row);
-            wrapped.source.push(i);
+            wrapped.source.push(source);
         }
     }
     wrapped
@@ -75,6 +74,89 @@ pub fn wrap_line(line: &Line, width: usize) -> Vec<Line> {
     rows
 }
 
+/// Word-wrap styled text into lines of at most `width` columns. Runs of whitespace
+/// collapse to one space, and a span containing "\n" forces a line break. Words
+/// longer than the width are split.
+pub fn wrap_words(spans: &[Span], width: usize) -> Vec<Line> {
+    let mut w = WordWrap {
+        width: width.max(1),
+        ..WordWrap::default()
+    };
+    let mut buf = [0u8; 4];
+    for span in spans {
+        for ch in span.text.chars() {
+            if ch == '\n' {
+                w.end_word();
+                w.break_line();
+            } else if ch.is_whitespace() {
+                w.end_word();
+                w.space.get_or_insert(span.style);
+            } else {
+                w.word.push(ch.encode_utf8(&mut buf), span.style);
+                w.word_width += ch.width().unwrap_or(0);
+            }
+        }
+    }
+    w.finish()
+}
+
+#[derive(Default)]
+struct WordWrap {
+    width: usize,
+    lines: Vec<Line>,
+    current: Line,
+    current_width: usize,
+    word: Line,
+    word_width: usize,
+    /// Style of the pending space before the next word, if any.
+    space: Option<Style>,
+}
+
+impl WordWrap {
+    fn end_word(&mut self) {
+        if self.word.spans.is_empty() {
+            return;
+        }
+        let word = std::mem::take(&mut self.word);
+        let word_width = std::mem::take(&mut self.word_width);
+        // No leading space at the start of a line.
+        let space = self.space.take().filter(|_| self.current_width > 0);
+
+        let space_width = usize::from(space.is_some());
+        if self.current_width > 0 && self.current_width + space_width + word_width > self.width {
+            self.break_line();
+        } else if let Some(style) = space {
+            self.current.push(" ", style);
+            self.current_width += 1;
+        }
+
+        if self.current_width == 0 && word_width > self.width {
+            let mut rows = wrap_line(&word, self.width);
+            let last = rows.pop().unwrap_or_default();
+            self.lines.extend(rows);
+            self.current_width = last.width();
+            self.current = last;
+        } else {
+            self.current.append(word);
+            self.current_width += word_width;
+        }
+    }
+
+    fn break_line(&mut self) {
+        self.lines.push(std::mem::take(&mut self.current));
+        self.current_width = 0;
+        self.space = None;
+    }
+
+    fn finish(mut self) -> Vec<Line> {
+        self.end_word();
+        if !self.current.spans.is_empty() || self.lines.is_empty() {
+            self.lines.push(self.current);
+        }
+        self.lines
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,6 +168,10 @@ mod tests {
 
     fn wrap(s: &str, width: usize) -> Vec<String> {
         texts(&wrap_line(&Line::plain(s), width))
+    }
+
+    fn words(s: &str, width: usize) -> Vec<String> {
+        texts(&wrap_words(&[Span::new(s, Style::default())], width))
     }
 
     #[test]
@@ -129,14 +215,56 @@ mod tests {
 
     #[test]
     fn wrap_all_tracks_sources() {
-        let lines: Vec<Line> = ["abcd", "x", "123456"]
-            .into_iter()
-            .map(Line::plain)
-            .collect();
-        let w = wrap_all(&lines, 2);
+        let mut r = Rendered::default();
+        r.push(Line::plain("abcd"), 0);
+        r.push(Line::plain("x"), 3);
+        r.push(Line::plain("123456"), 4);
+        let w = wrap_all(&r, 2);
         assert_eq!(texts(&w.rows), vec!["ab", "cd", "x", "12", "34", "56"]);
-        assert_eq!(w.source, vec![0, 0, 1, 2, 2, 2]);
-        assert_eq!(w.first_row_of(2), 3);
-        assert_eq!(row_count(&lines, 2), 6);
+        assert_eq!(w.source, vec![0, 0, 3, 4, 4, 4]);
+        assert_eq!(w.first_row_of(3), 2);
+        // A source line with no rows of its own anchors to the next one.
+        assert_eq!(w.first_row_of(1), 2);
+        assert_eq!(row_count(&r.lines, 2), 6);
+    }
+
+    #[test]
+    fn word_wrap_breaks_between_words() {
+        assert_eq!(
+            words("the quick brown fox jumps", 10),
+            vec!["the quick", "brown fox", "jumps"]
+        );
+    }
+
+    #[test]
+    fn word_wrap_collapses_whitespace() {
+        assert_eq!(words("  a   b \t c  ", 20), vec!["a b c"]);
+    }
+
+    #[test]
+    fn word_wrap_splits_long_words() {
+        assert_eq!(words("ab abcdefgh c", 4), vec!["ab", "abcd", "efgh", "c"]);
+    }
+
+    #[test]
+    fn word_wrap_hard_breaks() {
+        assert_eq!(words("a\nb c", 10), vec!["a", "b c"]);
+        assert_eq!(words("a\n\nb", 10), vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn word_wrap_keeps_styles_across_spans() {
+        let bold = Style {
+            bold: true,
+            ..Style::default()
+        };
+        let spans = [
+            Span::new("plain ", Style::default()),
+            Span::new("bold", bold),
+            Span::new(" tail", Style::default()),
+        ];
+        let rows = wrap_words(&spans, 10);
+        assert_eq!(texts(&rows), vec!["plain bold", "tail"]);
+        assert_eq!(rows[0].spans[1], Span::new("bold", bold));
     }
 }

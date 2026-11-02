@@ -227,3 +227,71 @@ fn other_theme_changes_colors() {
         .stdout;
     assert_ne!(dark, light);
 }
+
+#[test]
+fn piped_markdown_stays_raw() {
+    mmore_env()
+        .arg("tests/fixtures/sample.md")
+        .assert()
+        .success()
+        .stdout("# Title\n\nSome *markdown*.\n");
+}
+
+#[test]
+fn markdown_renders_with_color_always() {
+    mmore_env()
+        .args([
+            "--color",
+            "always",
+            "--width",
+            "20",
+            "tests/fixtures/sample.md",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# Title").not())
+        .stdout(predicate::str::contains(format!(
+            "{}\x1b[0m\n",
+            "═".repeat(20)
+        )))
+        .stdout(predicate::str::contains("\x1b[3mmarkdown\x1b[0m"));
+}
+
+#[test]
+fn max_width_caps_markdown() {
+    mmore_env()
+        .args([
+            "--color",
+            "always",
+            "--max-width",
+            "12",
+            "tests/fixtures/sample.md",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("{}\x1b", "═".repeat(12))));
+}
+
+#[test]
+fn plain_flag_shows_markdown_source() {
+    mmore_env()
+        .args(["--plain", "--color", "always", "tests/fixtures/sample.md"])
+        .assert()
+        .success()
+        .stdout("# Title\n\nSome *markdown*.\n");
+}
+
+#[test]
+fn language_flag_renders_markdown_from_stdin() {
+    mmore_env()
+        .args(["-l", "md", "--color", "always", "--width", "30"])
+        .write_stdin("## Hi\n\n- item\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("  • ").and(predicate::str::contains("## Hi").not()));
+}
+
+#[test]
+fn width_must_be_reasonable() {
+    mmore().args(["--width", "3", "x"]).assert().code(2);
+}
