@@ -1,0 +1,143 @@
+# mmore
+
+`mmore` is a terminal pager in the spirit of `more`. It pages plain text like
+`more` does, renders Markdown files as formatted text, and syntax-highlights source
+code.
+
+```sh
+mmore README.md          # rendered Markdown
+mmore src/main.rs        # highlighted code
+git log | mmore          # paging piped input
+mmore -n a.txt b.txt     # several files, with line numbers
+```
+
+## Install
+
+You need a Rust toolchain (`cargo`). From a checkout of this repository:
+
+```sh
+cargo install --path .
+```
+
+This builds an optimized binary and puts it in `~/.cargo/bin`. To install it
+somewhere else, add `--root DIR` (the binary goes in `DIR/bin`).
+
+## Features
+
+- **Pager**: `more`-style keys plus a few from `less`, search, several files, a
+  help screen (press `h`), and a status line with your position.
+- **Markdown**: headings, emphasis, lists, task lists, block quotes, GitHub alerts,
+  code blocks with highlighting, tables that fit the terminal width, footnotes,
+  images, front matter, and clickable links.
+- **Syntax highlighting** for the languages listed by `mmore --list-languages`,
+  including Rust, Python, JavaScript, TypeScript, Go, C, C++, Java, Ruby, shell,
+  SQL, HTML, CSS, JSON, YAML, and TOML. Large files open at once; colors fill in
+  from the top while you read.
+- **Fits the terminal**: everything re-flows when the window is resized, and
+  output that fits on one screen is printed without starting the pager.
+- **Plays well with pipes**: when the output is not a terminal, `mmore` prints the
+  input unchanged, like `cat`.
+
+## Keys
+
+| Key | Action |
+|-----|--------|
+| `Space`, `f`, `PgDn` | Next page (at the end of a file: next file) |
+| `b`, `PgUp` | Previous page |
+| `Enter`, `j`, `Down` | Next line |
+| `k`, `Up` | Previous line |
+| `d` / `u` | Half a page down / up |
+| `g`, `Home` / `G`, `End` | Top / bottom |
+| `/pattern`, `?pattern` | Search forward / backward |
+| `n` / `N` | Next / previous match |
+| `Esc` | Clear search highlighting |
+| `:n` / `:p` | Next / previous file |
+| `=`, `:f`, `Ctrl-G` | Show the file name and line number |
+| `m` | Switch between the rendered view and the raw source |
+| `h` | Help |
+| `q`, `:q`, `Ctrl-C` | Quit |
+
+Searches are regular expressions. They ignore case unless the pattern contains an
+uppercase letter. An empty pattern repeats the previous search.
+
+## Options
+
+| Option | Effect |
+|--------|--------|
+| `-n`, `--line-numbers` | Show source line numbers (in rendered Markdown, the line where each block starts) |
+| `-p`, `--plain` | Show files as plain text, without rendering or highlighting |
+| `-l`, `--language LANG` | Treat the input as `LANG`, by name or extension (`rust`, `py`, `md`) |
+| `--theme NAME` | Highlighting theme; `--list-themes` shows the choices |
+| `--color WHEN` | `auto`, `always`, or `never` |
+| `--hyperlinks WHEN` | Clickable links: `auto`, `always`, or `never` |
+| `--width N`, `--max-width N` | Render width, and the cap for Markdown (default 100) |
+| `--ascii` | Draw Markdown structure with ASCII characters only |
+| `--no-front-matter` | Hide YAML or TOML front matter |
+| `-e`, `--exit-at-eof` | Quit when paging past the end, like classic `more` |
+| `--no-pager`, `--always-page` | Never page, or page even short input |
+| `--force` | Show binary files anyway |
+
+Run `mmore --help` for the full list.
+
+### Defaults with `MMORE_OPTS`
+
+Options in the `MMORE_OPTS` environment variable apply to every run. Options given
+on the command line take precedence:
+
+```sh
+export MMORE_OPTS='-n --theme "Solarized (dark)"'
+mmore notes.md                    # line numbers, Solarized
+mmore --theme InspiredGitHub x.rs # line numbers, InspiredGitHub
+```
+
+## Colors and themes
+
+`mmore` uses 24-bit color when the terminal advertises it (`COLORTERM=truecolor`),
+otherwise 256 or 16 colors. Markdown uses the terminal's own palette, so it matches
+your color scheme.
+
+Without `--theme`, code is highlighted with `base16-ocean.dark`, or `InspiredGitHub`
+on a light background. To tell which it is, `mmore` checks `COLORFGBG`, then asks
+the terminal for its background color. If neither works, or over SSH, it assumes a
+dark background; set `--theme` (for example in `MMORE_OPTS`) to choose.
+
+Set `NO_COLOR` to turn colors off. Bold, underline, and reverse video are kept, so
+headings and search matches stay visible.
+
+## Clickable links
+
+Links in Markdown become clickable (OSC 8 hyperlinks) in terminals known to
+support them, including iTerm2, WezTerm, Warp, kitty, Ghostty, foot, Konsole,
+Windows Terminal, and VS Code. Only absolute URLs (such as `https://` and `mailto:`)
+are clickable; relative paths are shown but cannot be opened from a terminal. Use
+`--hyperlinks always` or `never` to override the detection.
+
+## When output is not a terminal
+
+If the output goes to a pipe or a file, `mmore` prints its input as is: no
+rendering, no colors, and no pager. This keeps `mmore file | grep x` working as
+expected. Add `--color always` to get rendered, colored output anyway.
+
+## Development
+
+```sh
+cargo test      # unit, snapshot, and command-line tests
+cargo clippy --all-targets -- -D warnings
+```
+
+Markdown rendering has snapshot tests (using `insta`) over the documents in
+`tests/fixtures/markdown`. After an intended change to the output, review and
+update them with `cargo insta review` (from the `cargo-insta` tool), or run the tests
+with `INSTA_UPDATE=always`
+and check the diff.
+
+`PLAN.md` describes the design and the milestones it was built in.
+
+## Credits
+
+`mmore` is built on [syntect](https://github.com/trishume/syntect),
+[pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark),
+[crossterm](https://github.com/crossterm-rs/crossterm), and
+[clap](https://github.com/clap-rs/clap). The bundled TypeScript and TOML grammars
+come from other projects; see `assets/syntaxes/SOURCES.md` for their sources and
+licenses.
