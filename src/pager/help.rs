@@ -38,7 +38,9 @@ const KEYS: &[(&str, &str)] = &[
     ("Esc", "Clear search highlighting"),
     (":n  :p", "Next / previous file"),
     (":f  =  Ctrl-G", "Show file name and line number"),
-    ("m", "Toggle rendered view and raw source"),
+    ("r", "Toggle rendered view and raw source"),
+    ("mX  'X", "Mark this place as letter X / go back to mark X"),
+    ("''", "Go back to where you were before the last jump"),
     ("v", "Edit the file ($VISUAL or $EDITOR), then reload it"),
     (
         "R",

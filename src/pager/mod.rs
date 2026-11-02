@@ -170,9 +170,15 @@ enum Flow {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PromptKind {
-    Search { backward: bool },
+    Search {
+        backward: bool,
+    },
     Command,
     Filter,
+    /// Waiting for the letter after `m` (set) or `'` (go).
+    Mark {
+        set: bool,
+    },
 }
 
 /// One laid-out screenful source: rows plus scroll position.
@@ -235,6 +241,10 @@ struct Pager<'a> {
     stamps: Vec<Option<Stamp>>,
     /// When `--watch` last looked at the file.
     watched_at: std::time::Instant,
+    /// Marks set with `m`: file and source line.
+    marks: std::collections::HashMap<char, (usize, usize)>,
+    /// Where `''` goes: the place before the last jump.
+    last_place: Option<(usize, usize)>,
 }
 
 /// What `--watch` compares to notice that a file changed.
@@ -288,6 +298,8 @@ impl<'a> Pager<'a> {
             toc: None,
             stamps,
             watched_at: std::time::Instant::now(),
+            marks: std::collections::HashMap::new(),
+            last_place: None,
         };
         pager.layout(0);
         pager
@@ -410,10 +422,12 @@ impl<'a> Pager<'a> {
         let count = self.count.take();
         match (action, count) {
             (Action::Top | Action::Bottom, Some(line)) => {
+                self.remember_place();
                 self.go_to_line(line);
                 return Flow::Continue;
             }
             (Action::Percent, count) => {
+                self.remember_place();
                 self.go_to_percent(count.unwrap_or(0));
                 return Flow::Continue;
             }
@@ -501,6 +515,10 @@ impl<'a> Pager<'a> {
             Action::NextHeading => self.next_heading(true),
             Action::PrevHeading => self.next_heading(false),
             Action::Contents => self.open_contents(),
+            Action::SetMark => self.prompt = Some((PromptKind::Mark { set: true }, String::new())),
+            Action::GoToMark => {
+                self.prompt = Some((PromptKind::Mark { set: false }, String::new()))
+            }
             Action::Reload => {
                 let file = &self.doc.files[self.file];
                 if file.path.is_some() && file.stream.is_none() {
@@ -524,6 +542,9 @@ impl<'a> Pager<'a> {
                     if !has_next && self.opts.exit_at_eof && !self.reading() {
                         return Flow::Quit;
                     }
+                }
+                if matches!(movement, Action::Top | Action::Bottom) {
+                    self.remember_place();
                 }
                 self.view.vp.apply(movement);
             }
@@ -570,10 +591,12 @@ impl<'a> Pager<'a> {
             KeyCode::Enter => match kind {
                 PromptKind::Search { backward } => self.start_search(&input, backward),
                 PromptKind::Filter => self.set_filter(&input),
-                PromptKind::Command => {}
+                PromptKind::Command | PromptKind::Mark { .. } => {}
             },
             KeyCode::Char(c) if !ctrl => match kind {
                 PromptKind::Command => return self.command(c),
+                PromptKind::Mark { set: true } => self.set_mark(c),
+                PromptKind::Mark { set: false } => self.go_to_mark(c),
                 PromptKind::Search { .. } | PromptKind::Filter => {
                     input.push(c);
                     self.prompt = Some((kind, input));
@@ -597,6 +620,52 @@ impl<'a> Pager<'a> {
             _ => self.message = Some(format!("Unknown command :{c} (h for help)")),
         }
         Flow::Continue
+    }
+
+    /// The current place: file and the source line at the top of the screen.
+    fn place(&self) -> (usize, usize) {
+        (self.file, self.view.anchor())
+    }
+
+    /// Remember the current place for `''`, before a jump.
+    fn remember_place(&mut self) {
+        self.last_place = Some(self.place());
+    }
+
+    fn go_to_place(&mut self, (file, source): (usize, usize)) {
+        if file != self.file && file < self.doc.files.len() {
+            self.switch_file(file);
+        }
+        let row = self.view.wrapped.first_row_of(source);
+        let vp = &mut self.view.vp;
+        vp.top = row.min(vp.max_top());
+    }
+
+    /// `m` and a letter.
+    fn set_mark(&mut self, letter: char) {
+        if letter.is_ascii_alphabetic() {
+            self.marks.insert(letter, self.place());
+            self.message = Some(format!("Mark {letter} set"));
+        } else {
+            self.message = Some("Marks are letters (a to z, A to Z)".into());
+        }
+    }
+
+    /// `'` and a letter goes to that mark; `''` goes back to before the last jump.
+    fn go_to_mark(&mut self, letter: char) {
+        let target = if letter == '\'' {
+            self.last_place
+        } else {
+            self.marks.get(&letter).copied()
+        };
+        match target {
+            Some(place) => {
+                self.remember_place();
+                self.go_to_place(place);
+            }
+            None if letter == '\'' => self.message = Some("No earlier place to go back to".into()),
+            None => self.message = Some(format!("No mark {letter}")),
+        }
     }
 
     /// Row where heading `index` is shown.
@@ -633,6 +702,7 @@ impl<'a> Pager<'a> {
     }
 
     fn go_to_heading(&mut self, index: usize) {
+        self.remember_place();
         let row = self.heading_row(index);
         let vp = &mut self.view.vp;
         vp.top = row.min(vp.max_top());
@@ -791,6 +861,7 @@ impl<'a> Pager<'a> {
                 self.view.matches = search.row_matches(&self.view.wrapped);
                 self.search = Some(search);
                 self.cursor = None;
+                self.remember_place();
                 self.jump(!backward, true);
             }
             Err(e) => self.message = Some(e),
@@ -804,6 +875,7 @@ impl<'a> Pager<'a> {
             return;
         };
         let forward = search.backward == reverse;
+        self.remember_place();
         self.jump(forward, false);
     }
 
@@ -1133,6 +1205,8 @@ impl<'a> Pager<'a> {
                     PromptKind::Search { backward: true } => "?",
                     PromptKind::Command => ":",
                     PromptKind::Filter => "&",
+                    PromptKind::Mark { set: true } => "m",
+                    PromptKind::Mark { set: false } => "'",
                 };
                 Some(format!("{prefix}{input}"))
             }
@@ -1465,12 +1539,12 @@ mod tests {
         let d = doc(&[("a.md", &md)]);
         let mut p = Pager::new(d, &OPTS, 40, 10);
         assert_eq!(top_text(&p), "Title");
-        press(&mut p, "m");
+        press(&mut p, "r");
         assert_eq!(top_text(&p), "# Title");
         // The confirmation message shows first; the status line marks the mode.
         assert!(screen(&p).contains("Showing raw source"));
         assert!(p.status().contains("[source]"));
-        press(&mut p, "dm");
+        press(&mut p, "dr");
         assert_eq!(p.view.anchor(), 4);
         assert!(!p.status().contains("[source]"));
     }
@@ -1544,7 +1618,7 @@ mod tests {
         assert!(plain_screen(&p).contains("_identifier_name = 1"));
         // The raw view shows no highlighting.
         let mut p = p;
-        press(&mut p, "m");
+        press(&mut p, "r");
         assert!(!screen(&p).contains("38;2;"));
     }
 
@@ -2037,6 +2111,44 @@ mod tests {
         // Without --watch nothing is checked.
         assert!(!p.check_watched());
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn marks_and_going_back() {
+        let d = doc(&[("a.txt", &numbered(100)), ("b.txt", &numbered(100))]);
+        let mut p = Pager::new(d, &OPTS, 40, 10);
+        press(&mut p, "20gma");
+        assert_eq!(p.message.as_deref(), Some("Mark a set"));
+        press(&mut p, "70g");
+        press(&mut p, "'a");
+        assert_eq!(top_text(&p), "line 20");
+        // '' goes back to before the last jump, and again goes forward.
+        press(&mut p, "''");
+        assert_eq!(top_text(&p), "line 70");
+        press(&mut p, "''");
+        assert_eq!(top_text(&p), "line 20");
+        // A mark can be in another file.
+        press(&mut p, ":n");
+        press(&mut p, "5g'a");
+        assert_eq!(p.file, 0);
+        assert_eq!(top_text(&p), "line 20");
+        // Search and G count as jumps too.
+        press(&mut p, "/line 50\n''");
+        assert_eq!(top_text(&p), "line 20");
+        press(&mut p, "G''");
+        assert_eq!(top_text(&p), "line 20");
+        press(&mut p, "'z");
+        assert_eq!(p.message.as_deref(), Some("No mark z"));
+        press(&mut p, "m1");
+        assert!(
+            p.message
+                .as_deref()
+                .unwrap()
+                .starts_with("Marks are letters")
+        );
+        // The mark prompt shows what it waits for.
+        press(&mut p, "m");
+        assert!(plain_screen(&p).contains("m"));
     }
 
     #[test]

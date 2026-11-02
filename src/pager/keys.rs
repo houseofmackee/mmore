@@ -45,6 +45,9 @@ pub enum Action {
     Contents,
     /// Load the file again (`R`).
     Reload,
+    /// Set a mark (`m` and a letter) or go to one (`'` and a letter, `''`).
+    SetMark,
+    GoToMark,
     Quit,
     None,
 }
@@ -89,7 +92,9 @@ pub fn map(key: KeyEvent) -> Action {
         KeyCode::Esc => Action::ClearSearch,
         KeyCode::Char(':') => Action::Command,
         KeyCode::Char('=') => Action::ShowPosition,
-        KeyCode::Char('m') => Action::ToggleRaw,
+        KeyCode::Char('r') => Action::ToggleRaw,
+        KeyCode::Char('m') => Action::SetMark,
+        KeyCode::Char('\'') => Action::GoToMark,
         KeyCode::Char('h' | 'H') | KeyCode::F(1) => Action::Help,
         KeyCode::Char('F') => Action::Follow,
         KeyCode::Char(c @ '0'..='9') => Action::Digit(c as u8 - b'0'),
@@ -196,7 +201,9 @@ mod tests {
         assert_eq!(map(key(KeyCode::Char('N'))), Action::PrevMatch);
         assert_eq!(map(key(KeyCode::Char(':'))), Action::Command);
         assert_eq!(map(key(KeyCode::Char('='))), Action::ShowPosition);
-        assert_eq!(map(key(KeyCode::Char('m'))), Action::ToggleRaw);
+        assert_eq!(map(key(KeyCode::Char('r'))), Action::ToggleRaw);
+        assert_eq!(map(key(KeyCode::Char('m'))), Action::SetMark);
+        assert_eq!(map(key(KeyCode::Char('\''))), Action::GoToMark);
         assert_eq!(map(key(KeyCode::Char('h'))), Action::Help);
         // Ctrl-N still moves a line, it is not "next match".
         assert_eq!(map(ctrl('n')), Action::LineDown);

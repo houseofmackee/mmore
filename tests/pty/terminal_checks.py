@@ -328,8 +328,8 @@ def pager_features(n100, links):
     out, code, snaps = run(f"{BIN} {n100} {links}", [":", "n", "q"], rows=10, cols=60)
     # The status line is cut to the terminal width, so long temp paths may not fit.
     check(":n switches to the next file", "[2/2] " in after(snaps, 1) and "Links" in after(snaps, 1))
-    out, code, snaps = run(f"{BIN} --always-page {links}", ["m", "q"], rows=10, cols=60)
-    check("m shows the raw source", "# Links" in after(snaps, 0) and "Showing raw source" in after(snaps, 0))
+    out, code, snaps = run(f"{BIN} --always-page {links}", ["r", "q"], rows=10, cols=60)
+    check("r shows the raw source", "# Links" in after(snaps, 0) and "Showing raw source" in after(snaps, 0))
     out, code, snaps = run(f"{BIN} {n100}", ["h", "q", "q"], rows=30)
     check("help screen opens and q returns before quitting", "mmore keys" in after(snaps, 0) and code == 0)
     out, code, _ = run(f"{BIN} -n {n100}", ["q"], rows=10, cols=40)

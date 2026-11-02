@@ -79,7 +79,9 @@ somewhere else, add `--root DIR` (the binary goes in `DIR/bin`).
 | `Esc` | Clear search highlighting |
 | `:n` / `:p` | Next / previous file |
 | `=`, `:f`, `Ctrl-G` | Show the file name and line number |
-| `m` | Switch between the rendered view and the raw source |
+| `r` | Switch between the rendered view and the raw source |
+| `m` + letter, `'` + letter | Mark the current place / go back to that mark |
+| `''` | Go back to where you were before the last jump |
 | `v` | Edit the file in `$VISUAL` or `$EDITOR`, at the current line, then reload it |
 | `R` | Reload the file |
 | `h` | Help |

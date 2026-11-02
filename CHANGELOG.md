@@ -12,6 +12,14 @@ section here, so a version can only be released once it has one.
 - `--watch` reloads the file whenever it changes on disk, to preview a document
   while editing it or keep up with a log; at the end of the file it stays at the
   end. `R` reloads by hand.
+- Marks, as in `less`: `m` and a letter marks the current place (in any file),
+  `'` and the letter goes back to it, and `''` returns to where you were before
+  the last jump (`g`, `G`, `%`, a search, a heading, or a mark).
+
+### Changed
+
+- The switch between the rendered view and the raw source moved from `m` to `r`,
+  since `m` now sets marks as in `less`.
 
 ## [0.2.0] - 2026-11-02
 
