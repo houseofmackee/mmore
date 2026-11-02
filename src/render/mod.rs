@@ -17,6 +17,18 @@ pub struct Rendered {
     pub source: Vec<usize>,
     /// Hyperlink targets, indexed by `Style::link`.
     pub links: Vec<String>,
+    /// Markdown headings, in order.
+    pub headings: Vec<Heading>,
+}
+
+/// A Markdown heading, for jumping between headings and the table of contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Heading {
+    /// 1 for `#`, up to 6.
+    pub level: u8,
+    pub text: String,
+    /// Source line where the heading is.
+    pub source: usize,
 }
 
 impl Rendered {

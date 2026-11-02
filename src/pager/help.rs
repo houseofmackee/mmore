@@ -26,6 +26,11 @@ const KEYS: &[(&str, &str)] = &[
     ),
     ("?pattern", "Search backward"),
     ("n  N", "Next / previous match"),
+    ("]  [", "Next / previous heading (Markdown)"),
+    (
+        "t",
+        "Table of contents (Markdown): j/k to choose, Enter to go",
+    ),
     (
         "&pattern",
         "Show only matching lines (& and Enter shows all again)",

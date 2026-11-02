@@ -73,6 +73,8 @@ somewhere else, add `--root DIR` (the binary goes in `DIR/bin`).
 | `F` | Follow new input at the end, as with `tail -f` (any key stops) |
 | `/pattern`, `?pattern` | Search forward / backward |
 | `&pattern` | Show only lines that match (`&` and Enter shows all again) |
+| `]` / `[` | Next / previous heading (Markdown) |
+| `t` | Table of contents (Markdown): choose with `j`/`k`, Enter goes there |
 | `n` / `N` | Next / previous match |
 | `Esc` | Clear search highlighting |
 | `:n` / `:p` | Next / previous file |

@@ -26,7 +26,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ansi::{self, ColorMode};
 use crate::document::{Document, File, LazyHighlight, gutter_span};
-use crate::render::Rendered;
+use crate::render::{Heading, Rendered};
 use crate::stream::Stream;
 use crate::style::Line;
 use crate::wrap::{Wrapped, column_of, slice_columns, wrap_all, wrap_line};
@@ -178,6 +178,8 @@ struct View {
     /// Number of source lines taken in (for streams: lines read so far). With a
     /// filter, more than the lines shown.
     lines: usize,
+    /// Markdown headings, for `]`, `[`, and the table of contents.
+    headings: Vec<Heading>,
     matches: RowMatches,
 }
 
@@ -217,6 +219,16 @@ struct Pager<'a> {
     hscroll: usize,
     /// Only lines matching this are shown (`&pattern`).
     filter: Option<Search>,
+    /// Heading last jumped to, with the scroll position then (like `cursor`).
+    heading_cursor: Option<(usize, usize)>,
+    /// The table of contents, while it is open.
+    toc: Option<Toc>,
+}
+
+/// Table of contents state: the selected heading and the first one shown.
+struct Toc {
+    selected: usize,
+    top: usize,
 }
 
 impl<'a> Pager<'a> {
@@ -242,6 +254,8 @@ impl<'a> Pager<'a> {
             chop: opts.chop,
             hscroll: 0,
             filter: None,
+            heading_cursor: None,
+            toc: None,
         };
         pager.layout(0);
         pager
@@ -260,8 +274,9 @@ impl<'a> Pager<'a> {
     fn layout(&mut self, anchor: usize) {
         let gutter = self.doc.gutter_width(self.file);
         let width = self.content_width(gutter);
-        let rendered = self.doc.render_file(self.file, width, self.raw);
+        let mut rendered = self.doc.render_file(self.file, width, self.raw);
         let lines = rendered.lines.len();
+        let headings = std::mem::take(&mut rendered.headings);
         let rendered = match &self.filter {
             Some(filter) => keep_matching(rendered, filter),
             None => rendered,
@@ -282,8 +297,10 @@ impl<'a> Pager<'a> {
             gutter,
             width,
             lines,
+            headings,
             matches,
         };
+        self.heading_cursor = None;
         if self.follow {
             self.view.vp.top = self.view.vp.max_top();
         }
@@ -304,6 +321,7 @@ impl<'a> Pager<'a> {
             gutter: 0,
             width: self.cols as usize,
             lines: 0,
+            headings: Vec::new(),
             matches: RowMatches::default(),
         });
     }
@@ -346,6 +364,9 @@ impl<'a> Pager<'a> {
                 _ => help.vp.apply(action),
             }
             return Flow::Continue;
+        }
+        if self.toc.is_some() {
+            return self.toc_key(key, action);
         }
 
         // A count (as in `120g`) applies to the next key.
@@ -445,6 +466,9 @@ impl<'a> Pager<'a> {
             }
             Action::Edit => return Flow::Edit,
             Action::Filter => self.prompt = Some((PromptKind::Filter, String::new())),
+            Action::NextHeading => self.next_heading(true),
+            Action::PrevHeading => self.next_heading(false),
+            Action::Contents => self.open_contents(),
             Action::None | Action::Digit(_) | Action::Percent => {}
             movement => {
                 if self.view.vp.at_end() && movement.moves_forward() {
@@ -529,6 +553,98 @@ impl<'a> Pager<'a> {
             'q' => return Flow::Quit,
             _ => self.message = Some(format!("Unknown command :{c} (h for help)")),
         }
+        Flow::Continue
+    }
+
+    /// Row where heading `index` is shown.
+    fn heading_row(&self, index: usize) -> usize {
+        self.view
+            .wrapped
+            .first_row_of(self.view.headings[index].source)
+    }
+
+    /// `]` and `[`: the next or previous heading. Like `n`, repeated presses keep
+    /// going even when the screen cannot scroll any further.
+    fn next_heading(&mut self, forward: bool) {
+        let count = self.view.headings.len();
+        if count == 0 {
+            self.message = Some("No headings here (Markdown files have them)".into());
+            return;
+        }
+        let top = self.view.vp.top;
+        let target = match self.heading_cursor {
+            Some((index, at)) if at == top => {
+                if forward {
+                    (index + 1 < count).then_some(index + 1)
+                } else {
+                    index.checked_sub(1)
+                }
+            }
+            _ if forward => (0..count).find(|&i| self.heading_row(i) > top),
+            _ => (0..count).rev().find(|&i| self.heading_row(i) < top),
+        };
+        match target {
+            Some(index) => self.go_to_heading(index),
+            None => self.message = Some("No more headings".into()),
+        }
+    }
+
+    fn go_to_heading(&mut self, index: usize) {
+        let row = self.heading_row(index);
+        let vp = &mut self.view.vp;
+        vp.top = row.min(vp.max_top());
+        self.heading_cursor = Some((index, vp.top));
+    }
+
+    /// `t`: open the table of contents, at the heading of the current section.
+    fn open_contents(&mut self) {
+        if self.view.headings.is_empty() {
+            self.message = Some("No headings here (Markdown files have them)".into());
+            return;
+        }
+        let anchor = self.view.anchor();
+        let selected = self
+            .view
+            .headings
+            .iter()
+            .rposition(|h| h.source <= anchor)
+            .unwrap_or(0);
+        let mut toc = Toc { selected, top: 0 };
+        keep_visible(&mut toc, self.content_height());
+        self.toc = Some(toc);
+    }
+
+    fn toc_key(&mut self, key: KeyEvent, action: Action) -> Flow {
+        let count = self.view.headings.len();
+        let height = self.content_height();
+        if key.code == KeyCode::Enter {
+            if let Some(toc) = self.toc.take() {
+                self.go_to_heading(toc.selected);
+            }
+            return Flow::Continue;
+        }
+        let Some(toc) = &mut self.toc else {
+            return Flow::Continue;
+        };
+        let last = count.saturating_sub(1);
+        let half = (height / 2).max(1);
+        toc.selected = match action {
+            Action::LineDown => (toc.selected + 1).min(last),
+            Action::LineUp => toc.selected.saturating_sub(1),
+            Action::PageDown => (toc.selected + height).min(last),
+            Action::PageUp => toc.selected.saturating_sub(height),
+            Action::HalfDown => (toc.selected + half).min(last),
+            Action::HalfUp => toc.selected.saturating_sub(half),
+            Action::Top => 0,
+            Action::Bottom => last,
+            Action::Suspend => return Flow::Suspend,
+            Action::Quit | Action::Contents | Action::ClearSearch | Action::Help => {
+                self.toc = None;
+                return Flow::Continue;
+            }
+            _ => toc.selected,
+        };
+        keep_visible(toc, height);
         Flow::Continue
     }
 
@@ -857,7 +973,50 @@ impl<'a> Pager<'a> {
         status
     }
 
+    /// The table of contents, as screen lines.
+    fn contents_lines(&self, toc: &Toc) -> Vec<Line> {
+        let width = (self.cols as usize).saturating_sub(1);
+        (toc.top..self.view.headings.len())
+            .take(self.content_height())
+            .map(|i| {
+                let heading = &self.view.headings[i];
+                let indent = "  ".repeat(usize::from(heading.level.saturating_sub(1)));
+                let style = crate::style::Style {
+                    bold: heading.level == 1,
+                    reverse: i == toc.selected,
+                    ..crate::style::Style::default()
+                };
+                let mut line = Line::default();
+                line.push(&format!(" {indent}{} ", heading.text), style);
+                slice_columns(&line, 0, width)
+            })
+            .collect()
+    }
+
     fn draw(&self, out: &mut impl Write) -> io::Result<()> {
+        if let Some(toc) = &self.toc {
+            let mode = self.opts.color.max(ColorMode::Mono);
+            let lines = self.contents_lines(toc);
+            let height = self.content_height();
+            for i in 0..height {
+                queue!(out, MoveTo(0, i as u16), Clear(ClearType::CurrentLine))?;
+                if let Some(line) = lines.get(i) {
+                    queue!(out, Print(ansi::render(line, mode, None)))?;
+                }
+            }
+            let max = (self.cols as usize).saturating_sub(1);
+            let status = "Contents: j/k to choose, Enter to go there, q to close";
+            queue!(
+                out,
+                MoveTo(0, height as u16),
+                Clear(ClearType::CurrentLine),
+                cursor::Hide,
+                SetAttribute(Attribute::Reverse),
+                Print(head(status, max)),
+                SetAttribute(Attribute::Reset),
+            )?;
+            return out.flush();
+        }
         let view = self.help.as_ref().unwrap_or(&self.view);
         let links = self
             .opts
@@ -932,10 +1091,20 @@ impl<'a> Pager<'a> {
     }
 }
 
+/// Scroll the table of contents so the selected heading is visible.
+fn keep_visible(toc: &mut Toc, height: usize) {
+    if toc.selected < toc.top {
+        toc.top = toc.selected;
+    } else if toc.selected >= toc.top + height {
+        toc.top = toc.selected + 1 - height;
+    }
+}
+
 /// Only the rendered lines that match `filter`, keeping their source lines.
 fn keep_matching(rendered: Rendered, filter: &Search) -> Rendered {
     let mut out = Rendered {
         links: rendered.links,
+        headings: rendered.headings,
         ..Rendered::default()
     };
     for (line, source) in rendered.lines.into_iter().zip(rendered.source) {
@@ -953,6 +1122,7 @@ fn empty_view() -> View {
         gutter: 0,
         width: 1,
         lines: 0,
+        headings: Vec::new(),
         matches: RowMatches::default(),
     }
 }
@@ -1653,6 +1823,67 @@ mod tests {
             p.edit_target(),
             Err("(standard input) cannot be opened in an editor".into())
         );
+    }
+
+    fn sections(n: usize) -> String {
+        (1..=n)
+            .map(|i| format!("## Section {i}\n\n{}\n", "text\n\n".repeat(5)))
+            .collect()
+    }
+
+    #[test]
+    fn brackets_jump_between_headings() {
+        let d = doc(&[("a.md", &sections(6))]);
+        let mut p = Pager::new(d, &OPTS, 40, 10);
+        assert_eq!(top_text(&p), "Section 1");
+        press(&mut p, "]");
+        assert_eq!(top_text(&p), "Section 2");
+        press(&mut p, "]]");
+        assert_eq!(top_text(&p), "Section 4");
+        press(&mut p, "[");
+        assert_eq!(top_text(&p), "Section 3");
+        // Near the end the screen cannot scroll, but ] still moves on.
+        press(&mut p, "]]");
+        press(&mut p, "]");
+        assert_eq!(p.heading_cursor.map(|c| c.0), Some(5));
+        press(&mut p, "]");
+        assert_eq!(p.message.as_deref(), Some("No more headings"));
+    }
+
+    #[test]
+    fn plain_files_have_no_headings() {
+        let d = doc(&[("a.txt", "# not a heading\n")]);
+        let mut p = Pager::new(d, &OPTS, 40, 10);
+        press(&mut p, "]");
+        assert!(p.message.as_deref().unwrap().starts_with("No headings"));
+        press(&mut p, "t");
+        assert!(p.toc.is_none());
+    }
+
+    #[test]
+    fn table_of_contents_chooses_and_jumps() {
+        let d = doc(&[("a.md", &format!("# Title\n\n{}", sections(30)))]);
+        let mut p = Pager::new(d, &OPTS, 40, 10);
+        press(&mut p, "]]]");
+        assert_eq!(top_text(&p), "Section 3");
+        press(&mut p, "t");
+        // Opens at the current section; indented by level; selection reversed.
+        let toc = p.toc.as_ref().unwrap();
+        assert_eq!(toc.selected, 3);
+        let s = screen(&p);
+        assert!(s.contains("\x1b[7m   Section 3 \x1b[0m"), "{s}");
+        assert!(s.contains("Contents: j/k"));
+        // Scrolls to keep the selection visible.
+        press(&mut p, "G");
+        assert_eq!(p.toc.as_ref().unwrap().selected, 30);
+        assert!(p.toc.as_ref().unwrap().top > 0);
+        press(&mut p, "kk\n");
+        assert!(p.toc.is_none());
+        assert_eq!(p.heading_cursor.map(|c| c.0), Some(28));
+        // q closes the contents without quitting.
+        press(&mut p, "t");
+        assert_eq!(press(&mut p, "q"), Flow::Continue);
+        assert!(p.toc.is_none());
     }
 
     #[test]

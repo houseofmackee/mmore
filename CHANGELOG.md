@@ -5,6 +5,11 @@ section here, so a version can only be released once it has one.
 
 ## [Unreleased]
 
+### Added
+
+- `]` and `[` jump to the next and previous heading in Markdown, and `t` opens a
+  table of contents to choose one from.
+
 ## [0.2.0] - 2026-11-02
 
 ### Added

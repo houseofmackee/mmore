@@ -38,6 +38,11 @@ pub enum Action {
     Edit,
     /// Show only matching lines (`&pattern`).
     Filter,
+    /// Next or previous Markdown heading (`]` and `[`).
+    NextHeading,
+    PrevHeading,
+    /// Table of contents (`t`).
+    Contents,
     Quit,
     None,
 }
@@ -92,6 +97,9 @@ pub fn map(key: KeyEvent) -> Action {
         KeyCode::Right => Action::ScrollRight,
         KeyCode::Char('v') => Action::Edit,
         KeyCode::Char('&') => Action::Filter,
+        KeyCode::Char(']') => Action::NextHeading,
+        KeyCode::Char('[') => Action::PrevHeading,
+        KeyCode::Char('t') => Action::Contents,
         _ => Action::None,
     }
 }

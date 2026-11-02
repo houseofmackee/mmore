@@ -17,7 +17,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::symbols::{self, Symbols};
 use super::table::{self, Table};
-use super::{Rendered, code, plain};
+use super::{Heading, Rendered, code, plain};
 use crate::assets;
 use crate::detect::{self, Kind};
 use crate::style::{Color, Line, Span, Style};
@@ -380,6 +380,14 @@ impl<'a> Renderer<'a> {
                 self.need_blank = true;
             }
             TagEnd::Heading(level) => {
+                // The text without the dim "### " marker of deeper headings.
+                let text: String = self.inline.iter().map(|s| s.text.as_str()).collect();
+                let text = text.trim_start_matches('#').trim().to_string();
+                self.out.headings.push(Heading {
+                    level: level as u8,
+                    text,
+                    source: self.src,
+                });
                 self.flush_inline();
                 let width = self.available();
                 let rule = match level {
@@ -937,6 +945,17 @@ mod tests {
         assert_eq!(code_lang("{.python}").as_deref(), Some("python"));
         assert_eq!(code_lang("  sh  title=x").as_deref(), Some("sh"));
         assert_eq!(code_lang(""), None);
+    }
+
+    #[test]
+    fn headings_are_recorded() {
+        let r = render("# One\n\ntext\n\n## Two *b*\n\n### Three\n", &opts(40));
+        let h: Vec<(u8, &str, usize)> = r
+            .headings
+            .iter()
+            .map(|h| (h.level, h.text.as_str(), h.source))
+            .collect();
+        assert_eq!(h, vec![(1, "One", 0), (2, "Two b", 4), (3, "Three", 6)]);
     }
 
     #[test]
