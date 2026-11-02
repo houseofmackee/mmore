@@ -312,6 +312,25 @@ fn print(document: &Document, width: usize, color: ColorMode, hyperlinks: bool) 
             }
             continue;
         }
+        if let Section::Code(lazy) = &file.content {
+            // Write each line as soon as it is highlighted, instead of first
+            // highlighting the whole file.
+            let gutter = document.gutter_width(index);
+            let mut number = 0;
+            let mut result = Ok(());
+            lazy.for_each_line(|line| {
+                number += 1;
+                let line = if gutter > 0 {
+                    document::numbered(line, Some(number), gutter)
+                } else {
+                    line
+                };
+                result = writeln!(out, "{}", ansi::render(&line, color, None));
+                result.is_ok()
+            });
+            result?;
+            continue;
+        }
         let rendered = document.render_one(index, width);
         let links = hyperlinks.then_some(rendered.links.as_slice());
         for line in &rendered.lines {

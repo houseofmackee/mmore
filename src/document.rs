@@ -103,18 +103,43 @@ impl LazyHighlight {
 
     /// All lines, highlighting synchronously if the background work is not done.
     pub fn all(&self) -> Vec<Line> {
+        let mut lines = Vec::new();
+        self.for_each_line(|line| {
+            lines.push(line);
+            true
+        });
+        lines
+    }
+
+    /// Hand every line to `f` in order, highlighting as it goes rather than
+    /// first (so printing a big file starts at once), until `f` returns false.
+    /// Lines after a point the highlighter gives up on are plain.
+    pub fn for_each_line(&self, mut f: impl FnMut(Line) -> bool) {
+        let mut sent = 0;
+        let mut more = true;
         if self.is_done() {
-            let highlighted = self.lines.read().unwrap_or_else(PoisonError::into_inner);
-            // Lines after a point the highlighter gave up on stay plain.
-            let mut lines = highlighted.clone();
-            lines.extend(
-                crate::render::plain::render(&self.text)
-                    .into_iter()
-                    .skip(highlighted.len()),
-            );
-            return lines;
+            let lines = self.lines.read().unwrap_or_else(PoisonError::into_inner);
+            for line in lines.iter() {
+                sent += 1;
+                if !f(line.clone()) {
+                    return;
+                }
+            }
+        } else {
+            code::highlight_lines(&self.text, self.syntax, self.theme, |line| {
+                sent += 1;
+                more = f(line);
+                more
+            });
         }
-        code::render(&self.text, self.syntax, self.theme)
+        if !more {
+            return;
+        }
+        for line in self.text.lines().skip(sent) {
+            if !f(crate::render::plain::sanitize(&Line::plain(line))) {
+                return;
+            }
+        }
     }
 }
 
@@ -486,6 +511,37 @@ mod tests {
         let line = lazy.line(0).unwrap();
         assert_eq!(line.text(), "fn main() {}");
         assert!(line.spans.iter().any(|s| s.style.fg.is_some()));
+    }
+
+    #[test]
+    fn for_each_line_streams_and_can_stop() {
+        let text = "fn a() {}\nfn b() {}\nfn c() {}\n";
+        let d = doc(vec![code_file(text)]);
+        let lazy = d.code(0).unwrap();
+        let mut seen = Vec::new();
+        lazy.for_each_line(|line| {
+            seen.push(line.text());
+            seen.len() < 2
+        });
+        assert_eq!(seen, vec!["fn a() {}", "fn b() {}"]);
+        // Same result whether or not the background highlighting has finished.
+        let before = lazy.all();
+        lazy.run();
+        assert_eq!(lazy.all(), before);
+        assert_eq!(before.len(), 3);
+        assert!(before[2].spans.iter().any(|s| s.style.fg.is_some()));
+    }
+
+    #[test]
+    fn for_each_line_continues_plain_after_a_very_long_line() {
+        let long = "x".repeat(code::MAX_HIGHLIGHT_LINE + 1);
+        let text = format!("fn a() {{}}\n{long}\nfn b() {{}}\n");
+        let d = doc(vec![code_file(&text)]);
+        let lines = d.code(0).unwrap().all();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].spans.iter().any(|s| s.style.fg.is_some()));
+        assert!(lines[2].spans.iter().all(|s| s.style.fg.is_none()));
+        assert_eq!(lines[2].text(), "fn b() {}");
     }
 
     #[test]
