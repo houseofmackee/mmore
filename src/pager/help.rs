@@ -15,6 +15,7 @@ const KEYS: &[(&str, &str)] = &[
     ("g  <  Home", "Go to the top"),
     ("G  >  End", "Go to the bottom"),
     ("Mouse wheel", "Scroll 3 lines (needs --mouse)"),
+    ("F", "Follow new input at the end (any key stops)"),
     (
         "/pattern",
         "Search forward (regex; case-insensitive if all lowercase)",
@@ -26,6 +27,7 @@ const KEYS: &[(&str, &str)] = &[
     (":f  =  Ctrl-G", "Show file name and line number"),
     ("m", "Toggle rendered view and raw source"),
     ("h", "Show or close this help"),
+    ("Ctrl-Z", "Suspend (fg to resume)"),
     ("q  :q  Ctrl-C", "Quit"),
 ];
 

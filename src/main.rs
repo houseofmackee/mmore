@@ -7,12 +7,14 @@ mod document;
 mod pager;
 mod render;
 mod source;
+mod stream;
 mod style;
 mod wrap;
 
 use std::io::{self, BufWriter, IsTerminal, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{CommandFactory, Parser};
 use syntect::highlighting::Theme;
@@ -21,8 +23,8 @@ use ansi::{ColorMode, When};
 use cli::Cli;
 use detect::Kind;
 use document::{Document, File, LazyHighlight, Section};
-use render::Rendered;
 use source::{Origin, Source};
+use stream::Stream;
 use style::Line;
 
 fn main() -> ExitCode {
@@ -130,6 +132,11 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
     let mut all_ok = true;
 
     for origin in origins {
+        // Piped input is shown while it is still arriving, when it can be.
+        if *origin == Origin::Stdin && cli.language.is_none() && !io::stdin().is_terminal() {
+            files.push(stream_stdin(cli, settings));
+            continue;
+        }
         let source = match Source::load(origin.clone()) {
             Ok(s) => s,
             Err(e) => {
@@ -150,14 +157,12 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
                 name,
                 content: Section::Plain,
                 raw: message,
+                stream: None,
             });
             continue;
         }
 
-        let text = source.text();
-        let raw = render::plain::render(&text);
-        let content = section(cli, &source.origin, text, settings);
-        files.push(File { name, content, raw });
+        files.push(text_file(cli, &source.origin, source.text(), settings));
     }
 
     let document = Document {
@@ -171,6 +176,44 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
         line_numbers: cli.line_numbers,
     };
     (document, all_ok)
+}
+
+fn text_file(cli: &Cli, origin: &Origin, text: String, settings: &Settings) -> File {
+    File {
+        name: origin.display_name(),
+        raw: render::plain::render(&text),
+        content: section(cli, origin, text, settings),
+        stream: None,
+    }
+}
+
+/// How long to wait for the first line of piped input, which may name a language
+/// (a `#!` line). Silent producers get a plain view after this.
+const FIRST_LINE_WAIT: Duration = Duration::from_millis(300);
+
+/// Read stdin in the background so it can be shown as it arrives. If the first
+/// line names a language (a `#!` line), highlighting needs the whole input, so
+/// wait for it and render it like a file.
+fn stream_stdin(cli: &Cli, settings: &Settings) -> File {
+    let name = Origin::Stdin.display_name();
+    let stream = Stream::spawn(io::stdin(), name.clone(), cli.force, settings.render);
+    stream.wait_for(1, Some(FIRST_LINE_WAIT));
+    if settings.render && !stream.is_binary() {
+        let first = stream.line(0).map(|l| l.text()).unwrap_or_default();
+        let kind = detect::detect(assets::syntaxes(), &Origin::Stdin, &first, None);
+        if !matches!(kind, Kind::Plain) {
+            // Highlighting needs the whole input.
+            let text = stream.take_text().unwrap_or_default();
+            return text_file(cli, &Origin::Stdin, text, settings);
+        }
+    }
+    stream.drop_text();
+    File {
+        name,
+        content: Section::Plain,
+        raw: Vec::new(),
+        stream: Some(stream),
+    }
 }
 
 fn section(cli: &Cli, origin: &Origin, text: String, settings: &Settings) -> Section {
@@ -204,12 +247,21 @@ fn output(
     let size = crossterm::terminal::size().ok().filter(|_| stdout_is_tty);
     let Some((cols, rows)) = size.filter(|_| !cli.no_pager) else {
         let width = size.map_or(DEFAULT_WIDTH, |(cols, _)| cols as usize);
-        return dump(&document.render_all(width), color, hyperlinks);
+        return print(document, width, color, hyperlinks);
     };
+    // Short piped input is printed directly too: give it a moment to end, or to
+    // fill the screen.
+    let mut streams_done = true;
+    for index in 0..document.files.len() {
+        if let Some(stream) = document.stream(index) {
+            let (_, done) = stream.wait_for(rows as usize, Some(FIT_WAIT));
+            streams_done &= done;
+        }
+    }
     // Leave a row free so the shell prompt does not push the first line off screen.
     // Counting rows needs no highlighting, so big files go straight to the pager.
-    if !cli.always_page && document.fits(cols as usize, rows as usize) {
-        return dump(&document.render_all(cols as usize), color, hyperlinks);
+    if !cli.always_page && streams_done && document.fits(cols as usize, rows as usize) {
+        return print(document, cols as usize, color, hyperlinks);
     }
     pager::run(
         document,
@@ -225,11 +277,46 @@ fn output(
 /// Render width when there is no terminal to measure.
 const DEFAULT_WIDTH: usize = 80;
 
-fn dump(rendered: &Rendered, color: ColorMode, hyperlinks: bool) -> io::Result<()> {
-    let links = hyperlinks.then_some(rendered.links.as_slice());
+/// How long to wait for piped input to end before deciding whether it fits.
+const FIT_WAIT: Duration = Duration::from_millis(300);
+
+/// Print every file without the pager. Streamed input is copied as it arrives
+/// (flushed after each batch), so `mmore` works in the middle of a pipeline.
+fn print(document: &Document, width: usize, color: ColorMode, hyperlinks: bool) -> io::Result<()> {
     let mut out = BufWriter::new(io::stdout().lock());
-    for line in &rendered.lines {
-        writeln!(out, "{}", ansi::render(line, color, links))?;
+    let several = document.files.len() > 1;
+    for (index, file) in document.files.iter().enumerate() {
+        if several {
+            for line in document::header(&file.name) {
+                writeln!(out, "{}", ansi::render(&line, color, None))?;
+            }
+        }
+        if let Some(stream) = &file.stream {
+            let gutter = document.gutter_width(index);
+            let mut printed = 0;
+            loop {
+                let (_, done) = stream.wait_for(printed + 1, None);
+                for line in stream.lines_from(printed) {
+                    printed += 1;
+                    let line = if gutter > 0 {
+                        document::numbered(line, Some(printed), gutter)
+                    } else {
+                        line
+                    };
+                    writeln!(out, "{}", ansi::render(&line, color, None))?;
+                }
+                out.flush()?;
+                if done && printed >= stream.len() {
+                    break;
+                }
+            }
+            continue;
+        }
+        let rendered = document.render_one(index, width);
+        let links = hyperlinks.then_some(rendered.links.as_slice());
+        for line in &rendered.lines {
+            writeln!(out, "{}", ansi::render(line, color, links))?;
+        }
     }
     out.flush()
 }

@@ -37,8 +37,9 @@ somewhere else, add `--root DIR` (the binary goes in `DIR/bin`).
   from the top while you read.
 - **Fits the terminal**: everything re-flows when the window is resized, and
   output that fits on one screen is printed without starting the pager.
-- **Plays well with pipes**: when the output is not a terminal, `mmore` prints the
-  input unchanged, like `cat`.
+- **Plays well with pipes**: piped input is shown while it is still arriving
+  (`F` follows new input, like `less`), and when the output is not a terminal,
+  `mmore` passes its input through unchanged, like `cat`.
 
 ## Keys
 
@@ -51,6 +52,7 @@ somewhere else, add `--root DIR` (the binary goes in `DIR/bin`).
 | `d` / `u` | Half a page down / up |
 | `g`, `Home` / `G`, `End` | Top / bottom |
 | Mouse wheel | Scroll 3 lines (with `--mouse`) |
+| `F` | Follow new input at the end, as with `tail -f` (any key stops) |
 | `/pattern`, `?pattern` | Search forward / backward |
 | `n` / `N` | Next / previous match |
 | `Esc` | Clear search highlighting |
@@ -58,6 +60,7 @@ somewhere else, add `--root DIR` (the binary goes in `DIR/bin`).
 | `=`, `:f`, `Ctrl-G` | Show the file name and line number |
 | `m` | Switch between the rendered view and the raw source |
 | `h` | Help |
+| `Ctrl-Z` | Suspend (`fg` resumes) |
 | `q`, `:q`, `Ctrl-C` | Quit |
 
 Searches are regular expressions. They ignore case unless the pattern contains an
@@ -126,11 +129,22 @@ Windows Terminal, and VS Code. Only absolute URLs (such as `https://` and `mailt
 are clickable; relative paths are shown but cannot be opened from a terminal. Use
 `--hyperlinks always` or `never` to override the detection.
 
+## Piped input
+
+Input from a pipe is shown as it arrives, so `make 2>&1 | mmore` starts paging
+right away and `tail -f app.log | mmore` keeps growing; press `F` to keep the newest
+lines in view. While input is still arriving, the status line shows
+`(waiting for input)` at the end instead of a percentage. Piped input is shown as
+plain text, unless its first line names a language (`#!/usr/bin/env python3`),
+in which case `mmore` waits for the end and highlights it. Line numbers (`-n`)
+for piped input always leave room for five digits, since its length is unknown.
+
 ## When output is not a terminal
 
 If the output goes to a pipe or a file, `mmore` prints its input as is: no
-rendering, no colors, and no pager. This keeps `mmore file | grep x` working as
-expected. Add `--color always` to get rendered, colored output anyway.
+rendering, no colors, and no pager. Piped input is copied through as it arrives,
+so `tail -f app.log | mmore | grep error` works. This keeps `mmore file | grep x`
+working as expected. Add `--color always` to get rendered, colored output anyway.
 
 ## Development
 
@@ -141,7 +155,8 @@ cargo clippy --all-targets -- -D warnings
 
 `tests/pty/terminal_checks.py` runs the built binary in a pseudo-terminal to check
 what unit tests cannot reach: paging keys, search, resizing, colors, hyperlinks,
-the mouse, and the terminal background query. Run it after a build:
+the mouse, streaming piped input, suspending with Ctrl-Z (using a small
+job-control shell), and the terminal background query. Run it after a build:
 
 ```sh
 cargo build && python3 tests/pty/terminal_checks.py

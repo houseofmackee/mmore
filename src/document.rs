@@ -16,6 +16,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::render::Rendered;
 use crate::render::code;
 use crate::render::markdown::{self, MdOptions};
+use crate::stream::Stream;
 use crate::style::{Line, Span, Style};
 use crate::wrap;
 
@@ -121,7 +122,25 @@ pub struct File {
     pub name: String,
     pub content: Section,
     /// The source as plain lines (tabs expanded, control characters escaped).
+    /// Empty for streamed input, whose lines are in `stream`.
     pub raw: Vec<Line>,
+    /// Input that is still being read (a pipe), shown as plain text.
+    pub stream: Option<Arc<Stream>>,
+}
+
+impl File {
+    /// The file's plain lines so far.
+    fn plain_lines(&self) -> Vec<Line> {
+        match &self.stream {
+            Some(stream) => stream.lines_from(0),
+            None => self.raw.clone(),
+        }
+    }
+
+    /// Number of source lines so far.
+    pub fn line_count(&self) -> usize {
+        self.stream.as_ref().map_or(self.raw.len(), |s| s.len())
+    }
 }
 
 pub struct Document {
@@ -146,6 +165,9 @@ impl Document {
     /// lines of that file.
     pub fn render_file(&self, index: usize, width: usize, raw: bool) -> Rendered {
         let file = &self.files[index];
+        if let Some(stream) = &file.stream {
+            return fixed(&stream.lines_from(0));
+        }
         match &file.content {
             Section::Markdown(text) if !raw => {
                 let width = self.width.unwrap_or(width).max(1);
@@ -161,6 +183,11 @@ impl Document {
             // Code starts plain; the pager shows highlighted lines as they arrive.
             Section::Markdown(_) | Section::Plain | Section::Code(_) => fixed(&file.raw),
         }
+    }
+
+    /// The input stream of a file that is still (or was) read from a pipe.
+    pub fn stream(&self, index: usize) -> Option<&Stream> {
+        self.files[index].stream.as_deref()
     }
 
     /// The lazy highlighter of a code file.
@@ -187,13 +214,12 @@ impl Document {
         let mut lines = Vec::new();
         for (i, file) in self.files.iter().enumerate() {
             if self.files.len() > 1 {
-                let bar = Line::plain(":".repeat(14));
-                lines.extend([bar.clone(), Line::plain(&file.name), bar]);
+                lines.extend(header(&file.name));
             }
             let gutter = self.gutter_width(i);
             let inner = width.saturating_sub(gutter).max(1);
             // Every line takes at least one row: skip the work for big files.
-            if lines.len() + file.raw.len() >= max_rows {
+            if lines.len() + file.line_count() >= max_rows {
                 return false;
             }
             match &file.content {
@@ -205,9 +231,9 @@ impl Document {
                     }
                 }
                 _ => {
-                    for line in &file.raw {
+                    for line in file.plain_lines() {
                         let mut row = Line::plain(" ".repeat(gutter));
-                        row.append(line.clone());
+                        row.append(line);
                         lines.push(row);
                     }
                 }
@@ -219,45 +245,56 @@ impl Document {
         wrap::fits(&lines, width, max_rows)
     }
 
-    /// Render every file one after the other, for printing without the pager.
-    /// With several files, each starts with a `more`-style header.
+    /// One file, ready to print: content with the line number gutter, and code
+    /// highlighted now. Link indexes refer to the returned link table. Streams
+    /// give the lines read so far.
+    pub fn render_one(&self, index: usize, width: usize) -> Rendered {
+        let gutter = self.gutter_width(index);
+        let file = &self.files[index];
+        let rendered = match (&file.content, &file.stream) {
+            // Printing needs every line highlighted now.
+            (Section::Code(lazy), None) => fixed(&lazy.all()),
+            _ => self.render_file(index, width.saturating_sub(gutter).max(1), false),
+        };
+        if gutter == 0 {
+            return rendered;
+        }
+        let mut out = Rendered {
+            links: rendered.links,
+            ..Rendered::default()
+        };
+        let mut previous = None;
+        for (line, source) in rendered.lines.into_iter().zip(rendered.source) {
+            let number = (previous != Some(source)).then_some(source + 1);
+            previous = Some(source);
+            out.push(numbered(line, number, gutter), source);
+        }
+        out
+    }
+
+    /// Every file one after the other with `more`-style headers, as printed.
+    #[cfg(test)]
     pub fn render_all(&self, width: usize) -> Rendered {
         let mut out = Rendered::default();
         let mut base = 0;
         for index in 0..self.files.len() {
             if self.files.len() > 1 {
-                let bar = ":".repeat(14);
-                for line in [bar.clone(), self.files[index].name.clone(), bar] {
-                    out.push(Line::plain(line), base);
+                for line in header(&self.files[index].name) {
+                    out.push(line, base);
                 }
             }
-            let gutter = self.gutter_width(index);
-            let rendered = match &self.files[index].content {
-                // Printing needs every line highlighted now.
-                Section::Code(lazy) => fixed(&lazy.all()),
-                _ => self.render_file(index, width.saturating_sub(gutter).max(1), false),
-            };
-            // Link indexes are per file; shift them into the shared table.
+            let rendered = self.render_one(index, width);
             let link_base = out.links.len() as u32;
             out.links.extend(rendered.links);
-            let mut previous = None;
             for (mut line, source) in rendered.lines.into_iter().zip(rendered.source) {
                 for span in &mut line.spans {
                     if let Some(link) = &mut span.style.link {
                         *link += link_base;
                     }
                 }
-                if gutter > 0 {
-                    let number = (previous != Some(source)).then_some(source + 1);
-                    let mut numbered = Line::default();
-                    numbered.spans.push(gutter_span(number, gutter));
-                    numbered.append(line);
-                    line = numbered;
-                }
-                previous = Some(source);
                 out.push(line, base + source);
             }
-            base += self.files[index].raw.len() + 1;
+            base += self.files[index].line_count() + 1;
         }
         out
     }
@@ -267,9 +304,29 @@ impl Document {
         if !self.line_numbers {
             return 0;
         }
-        let lines = self.files[index].raw.len().max(1);
+        let file = &self.files[index];
+        // Streams always leave room for growth: their length is unknown until they
+        // end, and the layout should not depend on how fast input arrives.
+        let lines = match &file.stream {
+            Some(stream) => stream.len().max(99_999),
+            None => file.line_count().max(1),
+        };
         lines.to_string().width().max(3) + 1
     }
+}
+
+/// The separator printed before each file when there are several, as `more` does.
+pub fn header(name: &str) -> [Line; 3] {
+    let bar = ":".repeat(14);
+    [Line::plain(&bar), Line::plain(name), Line::plain(bar)]
+}
+
+/// `line` with a gutter in front: its line number, or blanks for continuations.
+pub fn numbered(line: Line, number: Option<usize>, gutter: usize) -> Line {
+    let mut out = Line::default();
+    out.spans.push(gutter_span(number, gutter));
+    out.append(line);
+    out
 }
 
 /// A gutter cell: the right-aligned line number (or blanks) and a space.
@@ -307,6 +364,7 @@ mod tests {
             name: name.into(),
             content,
             raw: plain::render(raw),
+            stream: None,
         }
     }
 

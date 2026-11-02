@@ -17,22 +17,43 @@ static MOUSE_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Puts the terminal into raw mode on the alternate screen (optionally with mouse
 /// reporting). Restores it on drop, and a panic hook restores it if the program
 /// panics while paging.
-pub struct Screen;
+pub struct Screen {
+    mouse: bool,
+}
 
 impl Screen {
     pub fn enter(mouse: bool) -> io::Result<Self> {
         install_panic_hook();
-        terminal::enable_raw_mode()?;
         // Construct the guard before anything else can fail, so Drop always runs.
-        let screen = Screen;
+        let screen = Screen { mouse };
+        screen.setup()?;
+        Ok(screen)
+    }
+
+    fn setup(&self) -> io::Result<()> {
+        terminal::enable_raw_mode()?;
         let mut out = io::stdout();
         execute!(out, terminal::EnterAlternateScreen, cursor::Hide)?;
-        if mouse {
+        if self.mouse {
             MOUSE_ENABLED.store(true, Ordering::SeqCst);
             out.write_all(MOUSE_ON.as_bytes())?;
             out.flush()?;
         }
-        Ok(screen)
+        Ok(())
+    }
+
+    /// Ctrl-Z: give the terminal back and stop, like any job; continue after `fg`.
+    /// Raw mode turns off the terminal's own Ctrl-Z handling, so this does it: it
+    /// stops the whole process group, as the terminal would.
+    pub fn suspend(&self) -> io::Result<()> {
+        restore();
+        #[cfg(unix)]
+        // SAFETY: kill with pid 0 signals our own process group; no memory involved.
+        unsafe {
+            libc::kill(0, libc::SIGTSTP);
+        }
+        // Running again (or the stop was ignored, without job control).
+        self.setup()
     }
 }
 

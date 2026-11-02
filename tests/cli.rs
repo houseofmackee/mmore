@@ -459,3 +459,60 @@ fn help_mentions_environment() {
         .success()
         .stdout(predicate::str::contains("MMORE_OPTS"));
 }
+
+#[test]
+fn piped_input_is_copied_before_it_ends() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("mmore"))
+        .env_remove("MMORE_OPTS")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            tx.send(line.unwrap()).unwrap();
+        }
+    });
+    // The first line comes out while stdin is still open.
+    writeln!(stdin, "first").unwrap();
+    stdin.flush().unwrap();
+    let first = rx.recv_timeout(Duration::from_secs(5));
+    assert_eq!(first.as_deref(), Ok("first"));
+    writeln!(stdin, "second\tline").unwrap();
+    drop(stdin);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(5)).as_deref(),
+        Ok("second  line")
+    );
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn piped_binary_input_is_detected() {
+    mmore()
+        .write_stdin(b"PNG\0\x01\x02".to_vec())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "(standard input): Not a text file",
+        ));
+}
+
+#[test]
+fn piped_input_with_line_numbers() {
+    mmore()
+        .arg("-n")
+        .write_stdin("a\nb\n")
+        .assert()
+        .success()
+        // Piped input always gets room for 5 digits (its length is not known).
+        .stdout("    1 a\n    2 b\n");
+}

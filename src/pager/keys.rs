@@ -22,6 +22,10 @@ pub enum Action {
     ShowPosition,
     ToggleRaw,
     Help,
+    /// Go to the end and keep following new input (`F`, as in less).
+    Follow,
+    /// Stop the process (Ctrl-Z).
+    Suspend,
     Quit,
     None,
 }
@@ -47,6 +51,7 @@ pub fn map(key: KeyEvent) -> Action {
         KeyCode::Char('n') if ctrl => Action::LineDown,
         KeyCode::Char('p') if ctrl => Action::LineUp,
         KeyCode::Char('g') if ctrl => Action::ShowPosition,
+        KeyCode::Char('z') if ctrl => Action::Suspend,
         _ if ctrl => Action::None,
 
         KeyCode::Char('q' | 'Q') => Action::Quit,
@@ -67,6 +72,7 @@ pub fn map(key: KeyEvent) -> Action {
         KeyCode::Char('=') => Action::ShowPosition,
         KeyCode::Char('m') => Action::ToggleRaw,
         KeyCode::Char('h' | 'H') | KeyCode::F(1) => Action::Help,
+        KeyCode::Char('F') => Action::Follow,
         _ => Action::None,
     }
 }
@@ -110,6 +116,8 @@ mod tests {
         assert_eq!(map(key(KeyCode::Char('h'))), Action::Help);
         // Ctrl-N still moves a line, it is not "next match".
         assert_eq!(map(ctrl('n')), Action::LineDown);
+        assert_eq!(map(key(KeyCode::Char('F'))), Action::Follow);
+        assert_eq!(map(ctrl('z')), Action::Suspend);
     }
 
     #[test]

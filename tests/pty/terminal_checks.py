@@ -51,6 +51,34 @@ def set_size(fd, rows, cols):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
+#: Longest any single run may take before it is killed and counted as a failure.
+RUN_TIMEOUT = 30
+
+
+def finish(pid, fd, out=b""):
+    """Wait for the child to exit, reading its output meanwhile (a session leader
+    on macOS cannot exit while its terminal output is unread). Kills the process
+    group after RUN_TIMEOUT. Returns (exit code or None if killed, output)."""
+    deadline = time.time() + RUN_TIMEOUT
+    while True:
+        r, _, _ = select.select([fd], [], [], 0.05)
+        if r:
+            try:
+                out += os.read(fd, 65536)
+            except OSError:
+                pass
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            return os.waitstatus_to_exitcode(status), out
+        if time.time() > deadline:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(pid, 0)
+            return None, out
+
+
 def spawn(cmd, env, rows, cols):
     pid, fd = pty.fork()
     if pid == 0:
@@ -64,7 +92,8 @@ def run(cmd, keys, rows=10, cols=80, resize=None, env=None):
 
     After each key, output is read until it has been quiet for a moment. A
     snapshot of everything read so far is taken at the start and after each key.
-    "WAIT" pauses (for background work), "RESIZE" applies `resize` (rows, cols).
+    "WAIT" pauses (for background work), "PAUSE" waits briefly, and "RESIZE"
+    applies `resize` (rows, cols).
     """
     pid, fd = spawn(cmd, clean_env(env), rows, cols)
     out = b""
@@ -93,6 +122,9 @@ def run(cmd, keys, rows=10, cols=80, resize=None, env=None):
         if k == "WAIT":
             time.sleep(1.5)
             drain(0.5)
+        elif k == "PAUSE":
+            time.sleep(0.7)
+            drain(0.3)
         elif k == "RESIZE":
             set_size(fd, *resize)
             os.kill(pid, signal.SIGWINCH)
@@ -104,8 +136,10 @@ def run(cmd, keys, rows=10, cols=80, resize=None, env=None):
                 break
             drain()
         snapshots.append(out)
-    _, status = os.waitpid(pid, 0)
-    return out.decode(errors="replace"), os.waitstatus_to_exitcode(status), snapshots
+    code, out = finish(pid, fd, out)
+    if code is None:
+        check(f"finished within {RUN_TIMEOUT}s: {cmd}", False)
+    return out.decode(errors="replace"), code, snapshots
 
 
 def after(snaps, i):
@@ -141,10 +175,8 @@ def exits_after(cmd, keys, rows=10, cols=80, env=None):
         try:
             os.write(fd, b"q")
         except OSError:
-            os.waitpid(pid, 0)
-            return True
-        drain(1.0)
-        os.waitpid(pid, 0)
+            pass
+        finish(pid, fd)
     return bool(done)
 
 
@@ -177,12 +209,12 @@ def answering_terminal(reply, env=None):
         if b"DONE" in out:
             break
     elapsed = time.time() - start
-    os.waitpid(pid, 0)
+    _, out = finish(pid, fd, out)
     return out, elapsed
 
 
 def check(name, condition, detail=""):
-    print(("PASS " if condition else "FAIL ") + name + (f"  [{detail}]" if detail else ""))
+    print(("PASS " if condition else "FAIL ") + name + (f"  [{detail}]" if detail else ""), flush=True)
     if not condition:
         failed.append(name)
 
@@ -319,6 +351,92 @@ def background():
     check("no background query without colors", b"\x1b]11;?" not in out)
 
 
+def streaming():
+    # A producer that pauses: the first lines must show before it finishes.
+    slow = f"(seq 1 5; sleep 3; seq 6 40) | {BIN}"
+    out, code, snaps = run(slow, ["PAUSE", "WAIT", "WAIT", "q"], rows=10, cols=40)
+    # Within about a second, well before the producer's pause ends.
+    first = snaps[1].decode(errors="replace")
+    check(
+        "piped input is paged before it ends",
+        ALT_ON in first and "\x1b[5;1H\x1b[2K5" in first and "(waiting for input)" in first,
+    )
+    later = snaps[3][len(snaps[1]):].decode(errors="replace")
+    check("later input appears, then the status shows a percentage", "--More--(" in later and code == 0)
+
+    # A producer that is still running (like tail -f): quitting must not wait for
+    # it. The screen is restored right after q, while the producer still sleeps.
+    out, code, snaps = run(f"(seq 1 3; sleep 4) | {BIN}", ["q"], rows=10, cols=40)
+    check("q quits while input is still open", ALT_OFF in after(snaps, 0) and code == 0)
+
+    # F follows new input at the end.
+    follow = f"(seq 1 20; sleep 1; seq 21 60; sleep 4) | {BIN}"
+    out, code, snaps = run(follow, ["F", "WAIT", "q"], rows=10, cols=40)
+    followed = after(snaps, 1)
+    check(
+        "F keeps the newest input in view",
+        "Following new input" in after(snaps, 0) and "\x1b[9;1H\x1b[2K60" in followed,
+    )
+
+    # Printing (output is a pipe): lines are copied as they arrive.
+    out, code, snaps = run(f"(echo first; sleep 2; echo second) | {BIN} | cat", [], rows=10, cols=40)
+    early = snaps[0].decode(errors="replace")
+    check("printing copies piped input before it ends", "first" in early and "second" not in early)
+    out, code, _ = run(f"(echo first; sleep 1; echo second) | {BIN} | cat", ["WAIT"], rows=10, cols=40)
+    check("printing finishes when the input ends", "first" in out and "second" in out and code == 0)
+
+    # Short piped input is still printed directly, without the pager.
+    out, code, _ = run(f"printf 'a\\nb\\n' | {BIN}", [], rows=10, cols=40)
+    check("short piped input is printed without the pager", ALT_ON not in out and "b" in out)
+
+
+# A tiny shell with job control: runs mmore as a foreground job in its own
+# process group, reports when it stops, then resumes it like `fg`.
+JOB_SHELL = r"""
+import os, signal, sys
+signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+pid = os.fork()
+if pid == 0:
+    os.setpgid(0, 0)
+    signal.signal(signal.SIGTTOU, signal.SIG_DFL)
+    os.execvp(sys.argv[1], sys.argv[1:])
+os.setpgid(pid, pid)
+os.tcsetpgrp(0, pid)
+while True:
+    _, status = os.waitpid(pid, os.WUNTRACED)
+    if os.WIFSTOPPED(status):
+        os.tcsetpgrp(0, os.getpgrp())
+        print("STOPPED", flush=True)
+        sys.stdin.readline()
+        print("RESUMING", flush=True)
+        os.tcsetpgrp(0, pid)
+        os.killpg(pid, signal.SIGCONT)
+        continue
+    print("EXIT=%d" % os.waitstatus_to_exitcode(status), flush=True)
+    break
+"""
+
+
+def suspend(n100):
+    job = os.path.join(tempfile.gettempdir(), f"mmore-job-shell-{os.getpid()}.py")
+    with open(job, "w") as f:
+        f.write(JOB_SHELL)
+    try:
+        cmd = f"python3 -I {job} {BIN} {n100}"
+        out, code, snaps = run(cmd, ["\x1a", "\r", "j", "q"], rows=10, cols=40)
+    finally:
+        os.remove(job)
+    stopped = after(snaps, 0)
+    check("Ctrl-Z restores the terminal and stops mmore", ALT_OFF in stopped and "STOPPED" in stopped)
+    resumed = after(snaps, 1)
+    check("fg resumes the pager and redraws", "RESUMING" in resumed and ALT_ON in resumed and "--More--" in resumed)
+    check("pager works after resuming", "\x1b[1;1H\x1b[2K2" in after(snaps, 2) and "EXIT=0" in out)
+
+    # Without job control (no shell to resume it), Ctrl-Z must not hang mmore.
+    out, code, snaps = run(f"{BIN} {n100}", ["\x1a", "q"], rows=10, cols=40)
+    check("Ctrl-Z without job control keeps paging", ALT_ON in after(snaps, 0) and code == 0)
+
+
 def main():
     if not os.path.exists(BIN):
         sys.exit(f"mmore binary not found at {BIN}; run cargo build first")
@@ -330,6 +448,8 @@ def main():
         links = hyperlinks(tmp)
         pager_features(n100, links)
         mouse(n100)
+        streaming()
+        suspend(n100)
         background()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
