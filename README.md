@@ -146,7 +146,8 @@ are clickable; relative paths are shown but cannot be opened from a terminal. Us
 
 Input from a pipe is shown as it arrives, so `make 2>&1 | mmore` starts paging
 right away and `tail -f app.log | mmore` keeps growing; press `F` to keep the newest
-lines in view. While input is still arriving, the status line shows
+lines in view. The same goes for pipes given as file names, such as named pipes
+(FIFOs) and process substitution: `mmore <(make 2>&1)`. While input is still arriving, the status line shows
 `(waiting for input)` at the end instead of a percentage. Piped input is shown as
 plain text, unless its first line names a language (`#!/usr/bin/env python3`),
 in which case `mmore` waits for the end and highlights it. Line numbers (`-n`)

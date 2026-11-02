@@ -385,6 +385,16 @@ def streaming():
     out, code, _ = run(f"(echo first; sleep 1; echo second) | {BIN} | cat", ["WAIT"], rows=10, cols=40)
     check("printing finishes when the input ends", "first" in out and "second" in out and code == 0)
 
+    # Process substitution (a pipe given as a file name) streams the same way.
+    subst = f"bash -c '{BIN} <(seq 1 5; sleep 3; seq 6 40)'"
+    out, code, snaps = run(subst, ["PAUSE", "WAIT", "WAIT", "q"], rows=10, cols=40)
+    first = snaps[1].decode(errors="replace")
+    check(
+        "<(command) is paged before it ends",
+        ALT_ON in first and "\x1b[5;1H\x1b[2K5" in first and "(waiting for input)" in first,
+    )
+    check("<(command) shows the rest when it ends", "--More--(" in snaps[3][len(snaps[1]):].decode(errors="replace"))
+
     # Short piped input is still printed directly, without the pager.
     out, code, _ = run(f"printf 'a\\nb\\n' | {BIN}", [], rows=10, cols=40)
     check("short piped input is printed without the pager", ALT_ON not in out and "b" in out)

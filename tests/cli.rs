@@ -516,3 +516,98 @@ fn piped_input_with_line_numbers() {
         // Piped input always gets room for 5 digits (its length is not known).
         .stdout("    1 a\n    2 b\n");
 }
+
+/// A named pipe in a fresh temporary directory (Unix only).
+#[cfg(unix)]
+fn fifo(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("mmore-fifo-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join(name);
+    let status = std::process::Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "mkfifo failed");
+    (dir, path)
+}
+
+#[cfg(unix)]
+#[test]
+fn named_pipes_are_shown_as_they_arrive() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (dir, path) = fifo("log");
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("mmore"))
+        .env_remove("MMORE_OPTS")
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            tx.send(line.unwrap()).unwrap();
+        }
+    });
+    // Opening the FIFO for writing waits until mmore has opened it for reading.
+    let mut writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    writeln!(writer, "first").unwrap();
+    writer.flush().unwrap();
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(5)).as_deref(),
+        Ok("first")
+    );
+    writeln!(writer, "second").unwrap();
+    drop(writer);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(5)).as_deref(),
+        Ok("second")
+    );
+    assert!(child.wait().unwrap().success());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn named_pipes_with_language_are_read_whole() {
+    use std::io::Write;
+    let (dir, path) = fifo("code");
+    let writer_path = path.clone();
+    let writer = std::thread::spawn(move || {
+        let mut w = std::fs::OpenOptions::new()
+            .write(true)
+            .open(writer_path)
+            .unwrap();
+        w.write_all(b"fn main() {}\n").unwrap();
+    });
+    mmore_env()
+        .args(["-l", "rust", "--color", "always"])
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("38;5;"));
+    writer.join().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn regular_files_are_not_streamed() {
+    // A regular file keeps its full rendering (here: Markdown with headers).
+    mmore_env()
+        .args([
+            "--color",
+            "always",
+            "--width",
+            "20",
+            "tests/fixtures/sample.md",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("═".repeat(20)));
+}

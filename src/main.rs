@@ -132,10 +132,19 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
     let mut all_ok = true;
 
     for origin in origins {
-        // Piped input is shown while it is still arriving, when it can be.
-        if *origin == Origin::Stdin && cli.language.is_none() && !io::stdin().is_terminal() {
-            files.push(stream_stdin(cli, settings));
-            continue;
+        // Pipes are shown while their input is still arriving, when they can be.
+        if cli.language.is_none() {
+            match streamable(origin) {
+                Some(Input::Stdin) => {
+                    files.push(stream_input(cli, settings, origin, io::stdin()));
+                    continue;
+                }
+                Some(Input::File(file)) => {
+                    files.push(stream_input(cli, settings, origin, file));
+                    continue;
+                }
+                None => {}
+            }
         }
         let source = match Source::load(origin.clone()) {
             Ok(s) => s,
@@ -191,20 +200,48 @@ fn text_file(cli: &Cli, origin: &Origin, text: String, settings: &Settings) -> F
 /// (a `#!` line). Silent producers get a plain view after this.
 const FIRST_LINE_WAIT: Duration = Duration::from_millis(300);
 
-/// Read stdin in the background so it can be shown as it arrives. If the first
-/// line names a language (a `#!` line), highlighting needs the whole input, so
-/// wait for it and render it like a file.
-fn stream_stdin(cli: &Cli, settings: &Settings) -> File {
-    let name = Origin::Stdin.display_name();
-    let stream = Stream::spawn(io::stdin(), name.clone(), cli.force, settings.render);
+/// An input that can be shown while it is still being read.
+enum Input {
+    Stdin,
+    File(std::fs::File),
+}
+
+/// Whether `origin` is a pipe or similar (stdin, a FIFO, `<(command)`) that is
+/// best read in the background. Regular files are read at once; terminals are
+/// left alone, since the pager reads keys from the terminal.
+fn streamable(origin: &Origin) -> Option<Input> {
+    match origin {
+        Origin::Stdin => (!io::stdin().is_terminal()).then_some(Input::Stdin),
+        Origin::File(path) => {
+            let meta = std::fs::metadata(path).ok()?;
+            if meta.is_file() || meta.is_dir() {
+                return None;
+            }
+            let file = std::fs::File::open(path).ok()?;
+            (!file.is_terminal()).then_some(Input::File(file))
+        }
+    }
+}
+
+/// Read an input in the background so it can be shown as it arrives. If the
+/// first line names a language (a `#!` line), highlighting needs the whole
+/// input, so wait for it and render it like a file.
+fn stream_input(
+    cli: &Cli,
+    settings: &Settings,
+    origin: &Origin,
+    reader: impl std::io::Read + Send + 'static,
+) -> File {
+    let name = origin.display_name();
+    let stream = Stream::spawn(reader, name.clone(), cli.force, settings.render);
     stream.wait_for(1, Some(FIRST_LINE_WAIT));
     if settings.render && !stream.is_binary() {
         let first = stream.line(0).map(|l| l.text()).unwrap_or_default();
-        let kind = detect::detect(assets::syntaxes(), &Origin::Stdin, &first, None);
+        let kind = detect::detect(assets::syntaxes(), origin, &first, None);
         if !matches!(kind, Kind::Plain) {
             // Highlighting needs the whole input.
             let text = stream.take_text().unwrap_or_default();
-            return text_file(cli, &Origin::Stdin, text, settings);
+            return text_file(cli, origin, text, settings);
         }
     }
     stream.drop_text();
