@@ -502,6 +502,7 @@ dependencies = [
  "clap",
  "crossterm",
  "insta",
+ "libc",
  "predicates",
  "pulldown-cmark",
  "regex",

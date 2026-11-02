@@ -26,3 +26,6 @@ opt-level = 3
 
 [profile.release.build-override]
 opt-level = 3
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

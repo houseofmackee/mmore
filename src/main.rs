@@ -1,5 +1,6 @@
 mod ansi;
 mod assets;
+mod background;
 mod cli;
 mod detect;
 mod document;
@@ -34,7 +35,12 @@ fn main() -> ExitCode {
         return finish(list_languages());
     }
 
-    let theme_name = cli.theme.as_deref().unwrap_or(assets::default_theme_name());
+    let stdout_is_tty = io::stdout().is_terminal();
+    let color = ColorMode::resolve(cli.color, stdout_is_tty);
+    let theme_name = match &cli.theme {
+        Some(name) => name.as_str(),
+        None => assets::default_theme_name(light_background(color, stdout_is_tty)),
+    };
     let Some(theme) = assets::theme(theme_name) else {
         eprintln!("mmore: unknown theme '{theme_name}' (see --list-themes)");
         return ExitCode::from(2);
@@ -57,8 +63,6 @@ fn main() -> ExitCode {
         cli.files.iter().map(|p| Origin::from_arg(p)).collect()
     };
 
-    let stdout_is_tty = io::stdout().is_terminal();
-    let color = ColorMode::resolve(cli.color, stdout_is_tty);
     let settings = Settings {
         // Piped output stays raw (like `more` and `cat`) unless colors are forced.
         render: !cli.plain && (stdout_is_tty || cli.color == When::Always),
@@ -80,6 +84,17 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Whether the terminal background is light. Asking the terminal (OSC 11) only
+/// makes sense when writing to it with colors; otherwise only `COLORFGBG` counts.
+fn light_background(color: ColorMode, stdout_is_tty: bool) -> bool {
+    let light = if stdout_is_tty && color.enabled() {
+        background::is_light()
+    } else {
+        background::colorfgbg_is_light(std::env::var("COLORFGBG").ok().as_deref())
+    };
+    light.unwrap_or(false)
 }
 
 /// How inputs are turned into output.
@@ -220,7 +235,9 @@ fn dump(rendered: &Rendered, color: ColorMode, hyperlinks: bool) -> io::Result<(
 
 fn list_themes() -> io::Result<()> {
     let mut out = BufWriter::new(io::stdout().lock());
-    let default = assets::default_theme_name();
+    let stdout_is_tty = io::stdout().is_terminal();
+    let color = ColorMode::resolve(When::Auto, stdout_is_tty);
+    let default = assets::default_theme_name(light_background(color, stdout_is_tty));
     for name in assets::themes().themes.keys() {
         let marker = if name == default { " (default)" } else { "" };
         writeln!(out, "{name}{marker}")?;
