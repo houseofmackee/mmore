@@ -141,3 +141,20 @@ and check the diff.
 [clap](https://github.com/clap-rs/clap). The bundled TypeScript and TOML grammars
 come from other projects; see `assets/syntaxes/SOURCES.md` for their sources and
 licenses.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
+
+The bundled grammars in `assets/syntaxes` keep their own licenses (Apache-2.0 and
+MIT); see `assets/syntaxes/SOURCES.md`.
