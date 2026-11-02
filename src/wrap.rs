@@ -123,6 +123,41 @@ pub fn wrap_line(line: &Line, width: usize) -> Vec<Line> {
     rows
 }
 
+/// The part of `line` from display column `start` that fits in `width` columns,
+/// for showing long lines without wrapping. A double-width character cut by the
+/// left edge becomes a space, so columns stay aligned.
+pub fn slice_columns(line: &Line, start: usize, width: usize) -> Line {
+    let mut out = Line::default();
+    let mut col = 0;
+    let end = start + width;
+    let mut buf = [0u8; 4];
+    for span in &line.spans {
+        for ch in span.text.chars() {
+            let w = ch.width().unwrap_or(0);
+            if col >= end {
+                return out;
+            }
+            if col >= start && col + w <= end {
+                out.push(ch.encode_utf8(&mut buf), span.style);
+            } else if col < start && col + w > start {
+                out.push(&" ".repeat(col + w - start), span.style);
+            }
+            col += w;
+        }
+    }
+    out
+}
+
+/// Display column at which character `index` of `line` starts.
+pub fn column_of(line: &Line, index: usize) -> usize {
+    line.spans
+        .iter()
+        .flat_map(|s| s.text.chars())
+        .take(index)
+        .map(|c| c.width().unwrap_or(0))
+        .sum()
+}
+
 /// Word-wrap styled text into lines of at most `width` columns. Runs of whitespace
 /// collapse to one space, and a span containing "\n" forces a line break. Words
 /// longer than the width are split.
@@ -280,6 +315,19 @@ mod tests {
         assert_eq!(counted, 6);
         assert!(!fits(&[Line::plain("abcd")], 2, 2));
         assert!(fits(&[Line::plain("abcd")], 2, 3));
+    }
+
+    #[test]
+    fn slicing_columns_for_unwrapped_lines() {
+        let line = Line::plain("abcdefgh");
+        assert_eq!(slice_columns(&line, 2, 3).text(), "cde");
+        assert_eq!(slice_columns(&line, 6, 10).text(), "gh");
+        assert_eq!(slice_columns(&line, 20, 5).text(), "");
+        // A wide character cut by the left edge becomes a space.
+        let wide = Line::plain("a日本x");
+        assert_eq!(slice_columns(&wide, 2, 4).text(), " 本x");
+        assert_eq!(slice_columns(&wide, 0, 2).text(), "a");
+        assert_eq!(column_of(&wide, 2), 3);
     }
 
     #[test]

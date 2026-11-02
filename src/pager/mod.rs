@@ -4,6 +4,7 @@
 //! Files are shown one at a time (`:n` and `:p` switch), each remembering its
 //! scroll position.
 
+mod editor;
 mod help;
 mod keys;
 mod screen;
@@ -11,6 +12,7 @@ mod search;
 mod viewport;
 
 use std::io::{self, BufWriter, Write};
+use std::path::Path;
 use std::time::Duration;
 
 use crossterm::cursor::{self, MoveTo};
@@ -23,17 +25,20 @@ use crossterm::terminal::{self, Clear, ClearType};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ansi::{self, ColorMode};
-use crate::document::{Document, LazyHighlight, gutter_span};
+use crate::document::{Document, File, LazyHighlight, gutter_span};
 use crate::render::Rendered;
 use crate::stream::Stream;
 use crate::style::Line;
-use crate::wrap::{Wrapped, wrap_all, wrap_line};
+use crate::wrap::{Wrapped, column_of, slice_columns, wrap_all, wrap_line};
 use keys::Action;
 use screen::Screen;
 use search::{RowMatches, Search};
 use viewport::Viewport;
 
-pub struct Options {
+/// Loads a file again after it was edited (see `v`).
+pub type Reload<'a> = &'a dyn Fn(&Path) -> Option<File>;
+
+pub struct Options<'a> {
     /// Quit when moving forward past the end of the last file (classic `more`).
     pub exit_at_eof: bool,
     pub color: ColorMode,
@@ -41,10 +46,14 @@ pub struct Options {
     pub hyperlinks: bool,
     /// Report mouse buttons so the wheel scrolls.
     pub mouse: bool,
+    /// Start with long lines cut off instead of wrapped (`-S`).
+    pub chop: bool,
+    /// How to load a file again after editing it.
+    pub reload: Option<Reload<'a>>,
 }
 
 /// Page the document interactively until the user quits.
-pub fn run(document: &Document, opts: &Options) -> io::Result<()> {
+pub fn run(document: Document, opts: &Options) -> io::Result<()> {
     if document.files.is_empty() {
         return Ok(());
     }
@@ -58,8 +67,8 @@ pub fn run(document: &Document, opts: &Options) -> io::Result<()> {
     for key in keys::from_bytes(&crate::background::take_typeahead()) {
         match pager.key(key) {
             Flow::Quit => return Ok(()),
-            // Suspending before the first screen would be odd; ignore it here.
-            Flow::Suspend | Flow::Continue => {}
+            // Suspending or editing before the first screen would be odd.
+            Flow::Suspend | Flow::Edit | Flow::Continue => {}
         }
     }
     let mut dirty = true;
@@ -99,6 +108,23 @@ pub fn run(document: &Document, opts: &Options) -> io::Result<()> {
                         let (cols, rows) = terminal::size()?;
                         pager.resize(cols, rows);
                     }
+                    Flow::Edit => {
+                        match pager.edit_target() {
+                            Ok((path, line)) => {
+                                let result = screen.outside(|| editor::open(&path, line))?;
+                                match result {
+                                    Ok(()) => pager.reload(),
+                                    Err(e) => {
+                                        pager.message =
+                                            Some(format!("Could not run the editor: {e}"))
+                                    }
+                                }
+                            }
+                            Err(message) => pager.message = Some(message),
+                        }
+                        let (cols, rows) = terminal::size()?;
+                        pager.resize(cols, rows);
+                    }
                     Flow::Continue => {}
                 }
                 dirty = true;
@@ -130,12 +156,15 @@ enum Flow {
     Quit,
     /// Stop like a job (Ctrl-Z) and continue when resumed.
     Suspend,
+    /// Open the current file in an editor (`v`).
+    Edit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PromptKind {
     Search { backward: bool },
     Command,
+    Filter,
 }
 
 /// One laid-out screenful source: rows plus scroll position.
@@ -144,9 +173,10 @@ struct View {
     vp: Viewport,
     /// Width of the line number gutter (0 when off).
     gutter: usize,
-    /// Width the content was wrapped at.
+    /// Width the content was wrapped at (unlimited when long lines are cut off).
     width: usize,
-    /// Number of rendered lines (for streams: lines read when last laid out).
+    /// Number of source lines taken in (for streams: lines read so far). With a
+    /// filter, more than the lines shown.
     lines: usize,
     matches: RowMatches,
 }
@@ -159,8 +189,8 @@ impl View {
 }
 
 struct Pager<'a> {
-    doc: &'a Document,
-    opts: &'a Options,
+    doc: Document,
+    opts: &'a Options<'a>,
     cols: u16,
     rows: u16,
     file: usize,
@@ -179,17 +209,26 @@ struct Pager<'a> {
     follow: bool,
     /// Whether the current file's input had ended at the last layout or pull.
     stream_done: bool,
+    /// A count being typed, as in `120g`.
+    count: Option<usize>,
+    /// Long lines are cut off at the screen edge instead of wrapped.
+    chop: bool,
+    /// First column shown when lines are cut off.
+    hscroll: usize,
+    /// Only lines matching this are shown (`&pattern`).
+    filter: Option<Search>,
 }
 
 impl<'a> Pager<'a> {
-    fn new(doc: &'a Document, opts: &'a Options, cols: u16, rows: u16) -> Self {
+    fn new(doc: Document, opts: &'a Options<'a>, cols: u16, rows: u16) -> Self {
+        let files = doc.files.len();
         let mut pager = Pager {
             doc,
             opts,
             cols,
             rows,
             file: 0,
-            positions: vec![0; doc.files.len()],
+            positions: vec![0; files],
             raw: false,
             view: empty_view(),
             help: None,
@@ -199,6 +238,10 @@ impl<'a> Pager<'a> {
             message: None,
             follow: false,
             stream_done: true,
+            count: None,
+            chop: opts.chop,
+            hscroll: 0,
+            filter: None,
         };
         pager.layout(0);
         pager
@@ -208,12 +251,22 @@ impl<'a> Pager<'a> {
         (self.rows as usize).saturating_sub(1).max(1)
     }
 
+    /// Width available for content, next to the line number gutter.
+    fn content_width(&self, gutter: usize) -> usize {
+        (self.cols as usize).saturating_sub(gutter).max(1)
+    }
+
     /// Lay out the current file at the current size, scrolled to `anchor`.
     fn layout(&mut self, anchor: usize) {
         let gutter = self.doc.gutter_width(self.file);
-        let width = (self.cols as usize).saturating_sub(gutter).max(1);
+        let width = self.content_width(gutter);
         let rendered = self.doc.render_file(self.file, width, self.raw);
         let lines = rendered.lines.len();
+        let rendered = match &self.filter {
+            Some(filter) => keep_matching(rendered, filter),
+            None => rendered,
+        };
+        let width = if self.chop { usize::MAX } else { width };
         let wrapped = wrap_all(rendered, width);
         let matches = self
             .search
@@ -295,6 +348,34 @@ impl<'a> Pager<'a> {
             return Flow::Continue;
         }
 
+        // A count (as in `120g`) applies to the next key.
+        if let Action::Digit(d) = action {
+            let count = self.count.unwrap_or(0);
+            self.count = Some(count.saturating_mul(10).saturating_add(usize::from(d)));
+            return Flow::Continue;
+        }
+        let count = self.count.take();
+        match (action, count) {
+            (Action::Top | Action::Bottom, Some(line)) => {
+                self.go_to_line(line);
+                return Flow::Continue;
+            }
+            (Action::Percent, count) => {
+                self.go_to_percent(count.unwrap_or(0));
+                return Flow::Continue;
+            }
+            (Action::LineDown | Action::LineUp, Some(n)) => {
+                let n = n.min(isize::MAX as usize) as isize;
+                self.view
+                    .vp
+                    .scroll(if action == Action::LineDown { n } else { -n });
+                return Flow::Continue;
+            }
+            // Esc first cancels a count being typed.
+            (Action::ClearSearch, Some(_)) => return Flow::Continue,
+            _ => {}
+        }
+
         match action {
             Action::Quit => return Flow::Quit,
             Action::SearchForward => {
@@ -329,7 +410,42 @@ impl<'a> Pager<'a> {
                 self.view.vp.apply(Action::Bottom);
             }
             Action::Suspend => return Flow::Suspend,
-            Action::None => {}
+            Action::ToggleWrap => {
+                let anchor = self.view.anchor();
+                self.chop = !self.chop;
+                self.hscroll = 0;
+                self.layout(anchor);
+                self.message = Some(if self.chop {
+                    "Long lines are cut off (Left and Right scroll, w wraps them again)".into()
+                } else {
+                    "Long lines wrap".into()
+                });
+            }
+            Action::ScrollLeft | Action::ScrollRight => {
+                if !self.chop {
+                    self.message =
+                        Some("Long lines wrap; press w to cut them off and scroll".into());
+                    return Flow::Continue;
+                }
+                let width = self.content_width(self.view.gutter);
+                let step = (width / 2).max(1);
+                if action == Action::ScrollLeft {
+                    self.hscroll = self.hscroll.saturating_sub(step);
+                } else {
+                    let widest = self
+                        .view
+                        .wrapped
+                        .rows
+                        .iter()
+                        .map(Line::width)
+                        .max()
+                        .unwrap_or(0);
+                    self.hscroll = (self.hscroll + step).min(widest.saturating_sub(width));
+                }
+            }
+            Action::Edit => return Flow::Edit,
+            Action::Filter => self.prompt = Some((PromptKind::Filter, String::new())),
+            Action::None | Action::Digit(_) | Action::Percent => {}
             movement => {
                 if self.view.vp.at_end() && movement.moves_forward() {
                     let has_next = self.file + 1 < self.doc.files.len();
@@ -384,14 +500,14 @@ impl<'a> Pager<'a> {
                     self.prompt = Some((kind, input));
                 }
             }
-            KeyCode::Enter => {
-                if let PromptKind::Search { backward } = kind {
-                    self.start_search(&input, backward);
-                }
-            }
+            KeyCode::Enter => match kind {
+                PromptKind::Search { backward } => self.start_search(&input, backward),
+                PromptKind::Filter => self.set_filter(&input),
+                PromptKind::Command => {}
+            },
             KeyCode::Char(c) if !ctrl => match kind {
                 PromptKind::Command => return self.command(c),
-                PromptKind::Search { .. } => {
+                PromptKind::Search { .. } | PromptKind::Filter => {
                     input.push(c);
                     self.prompt = Some((kind, input));
                 }
@@ -414,6 +530,69 @@ impl<'a> Pager<'a> {
             _ => self.message = Some(format!("Unknown command :{c} (h for help)")),
         }
         Flow::Continue
+    }
+
+    /// Go to source line `line` (counting from 1), as `120g` does.
+    fn go_to_line(&mut self, line: usize) {
+        let row = self.view.wrapped.first_row_of(line.saturating_sub(1));
+        let vp = &mut self.view.vp;
+        vp.top = row.min(vp.max_top());
+    }
+
+    /// Go to `percent` of the way through the file, as `50%` does.
+    fn go_to_percent(&mut self, percent: usize) {
+        let vp = &mut self.view.vp;
+        let row = vp.total.saturating_mul(percent.min(100)) / 100;
+        vp.top = row.min(vp.max_top());
+    }
+
+    /// `&pattern`: show only matching lines. An empty pattern shows all again.
+    fn set_filter(&mut self, input: &str) {
+        let anchor = self.view.anchor();
+        if input.is_empty() {
+            if self.filter.take().is_some() {
+                self.message = Some("Showing all lines".into());
+            }
+            self.layout(anchor);
+            return;
+        }
+        match Search::new(input, false) {
+            Ok(filter) => {
+                self.filter = Some(filter);
+                self.layout(anchor);
+            }
+            Err(e) => self.message = Some(e),
+        }
+    }
+
+    /// The file to open in the editor, and the line at the top of the screen.
+    fn edit_target(&self) -> Result<(std::path::PathBuf, usize), String> {
+        let file = &self.doc.files[self.file];
+        match &file.path {
+            Some(path) if file.stream.is_none() => Ok((path.clone(), self.view.anchor() + 1)),
+            _ => Err(format!("{} cannot be opened in an editor", file.name)),
+        }
+    }
+
+    /// Load the current file again (after editing), keeping the place.
+    fn reload(&mut self) {
+        let Some(reload) = self.opts.reload else {
+            return;
+        };
+        let Some(path) = self.doc.files[self.file].path.clone() else {
+            return;
+        };
+        match reload(&path) {
+            Some(file) => {
+                self.doc.files[self.file] = file;
+                self.doc.start_highlighting_file(self.file);
+                let anchor = self.view.anchor();
+                self.layout(anchor);
+            }
+            None => {
+                self.message = Some(format!("Could not read {} again", path.display()));
+            }
+        }
     }
 
     fn start_search(&mut self, input: &str, backward: bool) {
@@ -455,8 +634,24 @@ impl<'a> Pager<'a> {
             Some(row) => {
                 vp.top = row.min(vp.max_top());
                 self.cursor = Some((row, vp.top));
+                self.reveal_match(row);
             }
             None => self.message = Some("Pattern not found".into()),
+        }
+    }
+
+    /// With long lines cut off, scroll sideways so the match in `row` is visible.
+    fn reveal_match(&mut self, row: usize) {
+        if !self.chop {
+            return;
+        }
+        let Some(start) = self.view.matches.ranges.get(row).and_then(|r| r.first()) else {
+            return;
+        };
+        let col = column_of(&self.view.wrapped.rows[row], start.start);
+        let width = self.content_width(self.view.gutter);
+        if col < self.hscroll || col >= self.hscroll + width {
+            self.hscroll = col.saturating_sub(width / 4);
         }
     }
 
@@ -474,7 +669,7 @@ impl<'a> Pager<'a> {
         let wrapped = &self.view.wrapped;
         let bottom = (self.view.vp.top + self.view.vp.height).min(wrapped.rows.len());
         let last_line = wrapped
-            .line
+            .source
             .get(bottom.saturating_sub(1))
             .copied()
             .unwrap_or(0);
@@ -521,11 +716,15 @@ impl<'a> Pager<'a> {
         for (i, line) in new.into_iter().enumerate() {
             rendered.push(line, have + i);
         }
+        if let Some(filter) = &self.filter {
+            rendered = keep_matching(rendered, filter);
+        }
         let mut more = wrap_all(rendered, self.view.width);
         // Match on the new rows while their line numbers still start at 0.
         let matches = self.search.as_ref().map(|s| s.row_matches(&more));
+        let shown = self.view.wrapped.line.last().map_or(0, |l| l + 1);
         for line in &mut more.line {
-            *line += have;
+            *line += shown;
         }
         let view = &mut self.view;
         view.wrapped.rows.append(&mut more.rows);
@@ -559,7 +758,7 @@ impl<'a> Pager<'a> {
     fn newly_highlighted_on_screen(&self, drawn: usize) -> bool {
         let wrapped = &self.view.wrapped;
         let vp = &self.view.vp;
-        let Some(&last_line) = wrapped.line.get(
+        let Some(&last_line) = wrapped.source.get(
             (vp.top + vp.height)
                 .min(wrapped.rows.len())
                 .saturating_sub(1),
@@ -576,14 +775,15 @@ impl<'a> Pager<'a> {
         let Some(lazy) = self.lazy() else {
             return row.clone();
         };
-        let index = view.wrapped.line[r];
-        let Some(highlighted) = lazy.line(index) else {
+        // Code is shown line for line, so the source line is the highlighted line.
+        let Some(highlighted) = lazy.line(view.wrapped.source[r]) else {
             return row.clone();
         };
         // Which of this line's rows `r` is.
+        let line = view.wrapped.line[r];
         let first = (0..=r)
             .rev()
-            .take_while(|&i| view.wrapped.line[i] == index)
+            .take_while(|&i| view.wrapped.line[i] == line)
             .last()
             .unwrap_or(r);
         wrap_line(&highlighted, view.width)
@@ -647,6 +847,13 @@ impl<'a> Pager<'a> {
         if self.raw {
             status.push_str("  [source]");
         }
+        if let Some(filter) = &self.filter {
+            let shown = self.view.wrapped.line.last().map_or(0, |l| l + 1);
+            status.push_str(&format!("  [&{}: {shown} lines]", filter.pattern));
+        }
+        if self.chop && self.hscroll > 0 {
+            status.push_str(&format!("  [from column {}]", self.hscroll + 1));
+        }
         status
     }
 
@@ -675,7 +882,13 @@ impl<'a> Pager<'a> {
                     .push(gutter_span(first.then_some(source + 1), view.gutter));
             }
             let ranges = view.matches.ranges.get(r).map_or(&[][..], Vec::as_slice);
-            line.append(search::highlight(&row, ranges));
+            let content = search::highlight(&row, ranges);
+            if self.chop && self.help.is_none() {
+                let width = self.content_width(view.gutter);
+                line.append(slice_columns(&content, self.hscroll, width));
+            } else {
+                line.append(content);
+            }
             queue!(out, Print(ansi::render(&line, mode, links)))?;
         }
 
@@ -683,13 +896,20 @@ impl<'a> Pager<'a> {
         let max = (self.cols as usize).saturating_sub(1);
         let bottom = view.vp.height as u16;
         queue!(out, MoveTo(0, bottom), Clear(ClearType::CurrentLine))?;
-        if let Some((kind, input)) = &self.prompt {
-            let prefix = match kind {
-                PromptKind::Search { backward: false } => "/",
-                PromptKind::Search { backward: true } => "?",
-                PromptKind::Command => ":",
-            };
-            let text = format!("{prefix}{input}");
+        let typing = match (&self.prompt, self.count) {
+            (Some((kind, input)), _) => {
+                let prefix = match kind {
+                    PromptKind::Search { backward: false } => "/",
+                    PromptKind::Search { backward: true } => "?",
+                    PromptKind::Command => ":",
+                    PromptKind::Filter => "&",
+                };
+                Some(format!("{prefix}{input}"))
+            }
+            (None, Some(count)) => Some(count.to_string()),
+            (None, None) => None,
+        };
+        if let Some(text) = typing {
             // Keep the end of long input visible.
             let shown = tail(&text, max);
             queue!(
@@ -710,6 +930,20 @@ impl<'a> Pager<'a> {
         }
         out.flush()
     }
+}
+
+/// Only the rendered lines that match `filter`, keeping their source lines.
+fn keep_matching(rendered: Rendered, filter: &Search) -> Rendered {
+    let mut out = Rendered {
+        links: rendered.links,
+        ..Rendered::default()
+    };
+    for (line, source) in rendered.lines.into_iter().zip(rendered.source) {
+        if filter.is_match(&line.text()) {
+            out.push(line, source);
+        }
+    }
+    out
 }
 
 fn empty_view() -> View {
@@ -764,6 +998,7 @@ mod tests {
                 .iter()
                 .map(|(name, text)| File {
                     name: name.to_string(),
+                    path: None,
                     content: if name.ends_with(".md") {
                         Section::Markdown(text.to_string())
                     } else {
@@ -783,11 +1018,13 @@ mod tests {
         }
     }
 
-    const OPTS: Options = Options {
+    const OPTS: Options<'static> = Options {
         exit_at_eof: false,
         color: ColorMode::None,
         hyperlinks: false,
         mouse: false,
+        chop: false,
+        reload: None,
     };
 
     fn press(p: &mut Pager, keys: &str) -> Flow {
@@ -838,7 +1075,7 @@ mod tests {
     #[test]
     fn search_jumps_and_highlights() {
         let d = doc(&[("a.txt", &numbered(100))]);
-        let mut p = Pager::new(&d, &OPTS, 80, 10);
+        let mut p = Pager::new(d, &OPTS, 80, 10);
         press(&mut p, "/line 5\n");
         assert_eq!(top_text(&p), "line 5");
         // Matches are shown in reverse video.
@@ -854,7 +1091,7 @@ mod tests {
     #[test]
     fn search_regex_smart_case_and_not_found() {
         let d = doc(&[("a.txt", "alpha\nBeta\nbeta\n")]);
-        let mut p = Pager::new(&d, &OPTS, 80, 2);
+        let mut p = Pager::new(d, &OPTS, 80, 2);
         press(&mut p, "/Beta\n");
         assert_eq!(top_text(&p), "Beta");
         press(&mut p, "n");
@@ -868,7 +1105,7 @@ mod tests {
     #[test]
     fn backward_search_and_repeat_with_empty_pattern() {
         let d = doc(&[("a.txt", &numbered(30))]);
-        let mut p = Pager::new(&d, &OPTS, 80, 5);
+        let mut p = Pager::new(d, &OPTS, 80, 5);
         press(&mut p, "G");
         assert_eq!(top_text(&p), "line 27");
         press(&mut p, "?line 1\n");
@@ -887,7 +1124,7 @@ mod tests {
     fn matches_at_the_end_still_advance() {
         // The last screen cannot scroll further, but n must still move on.
         let d = doc(&[("a.txt", "x\nx\nx\nhit a\nhit b\nhit c\n")]);
-        let mut p = Pager::new(&d, &OPTS, 80, 5);
+        let mut p = Pager::new(d, &OPTS, 80, 5);
         press(&mut p, "/hit\n");
         let first = p.cursor;
         press(&mut p, "n");
@@ -901,7 +1138,7 @@ mod tests {
     #[test]
     fn prompt_editing() {
         let d = doc(&[("a.txt", &numbered(20))]);
-        let mut p = Pager::new(&d, &OPTS, 80, 5);
+        let mut p = Pager::new(d, &OPTS, 80, 5);
         press(&mut p, "/line 9x\x08");
         assert!(screen(&p).contains("/line 9"));
         press(&mut p, "\n");
@@ -916,7 +1153,7 @@ mod tests {
     #[test]
     fn switching_files_keeps_positions() {
         let d = doc(&[("a.txt", &numbered(50)), ("b.txt", &numbered(50))]);
-        let mut p = Pager::new(&d, &OPTS, 80, 10);
+        let mut p = Pager::new(d, &OPTS, 80, 10);
         press(&mut p, " ");
         assert_eq!(top_text(&p), "line 10");
         assert!(screen(&p).contains("[1/2] a.txt"));
@@ -932,7 +1169,7 @@ mod tests {
     #[test]
     fn space_at_end_goes_to_next_file() {
         let d = doc(&[("a.txt", &numbered(12)), ("b.txt", "other\n")]);
-        let mut p = Pager::new(&d, &OPTS, 80, 10);
+        let mut p = Pager::new(d, &OPTS, 80, 10);
         press(&mut p, "G");
         assert!(screen(&p).contains("Next file: b.txt"));
         // A line step at the end does not switch files; a page step does.
@@ -950,7 +1187,7 @@ mod tests {
             ..OPTS
         };
         let d = doc(&[("a.txt", &numbered(12))]);
-        let mut p = Pager::new(&d, &opts, 80, 10);
+        let mut p = Pager::new(d, &opts, 80, 10);
         assert_eq!(press(&mut p, " "), Flow::Continue);
         assert_eq!(press(&mut p, " "), Flow::Quit);
     }
@@ -958,7 +1195,7 @@ mod tests {
     #[test]
     fn colon_commands() {
         let d = doc(&[("a.txt", &numbered(5))]);
-        let mut p = Pager::new(&d, &OPTS, 80, 10);
+        let mut p = Pager::new(d, &OPTS, 80, 10);
         press(&mut p, ":f");
         assert_eq!(p.message.as_deref(), Some("a.txt, line 1 of 5"));
         press(&mut p, ":x");
@@ -969,7 +1206,7 @@ mod tests {
     #[test]
     fn position_message() {
         let d = doc(&[("a.txt", &numbered(40)), ("b.txt", "x\n")]);
-        let mut p = Pager::new(&d, &OPTS, 80, 10);
+        let mut p = Pager::new(d, &OPTS, 80, 10);
         press(&mut p, "d=");
         assert_eq!(
             p.message.as_deref(),
@@ -984,7 +1221,7 @@ mod tests {
     fn raw_toggle_keeps_place() {
         let md = format!("# Title\n\n{}", "para\n\n".repeat(30));
         let d = doc(&[("a.md", &md)]);
-        let mut p = Pager::new(&d, &OPTS, 40, 10);
+        let mut p = Pager::new(d, &OPTS, 40, 10);
         assert_eq!(top_text(&p), "Title");
         press(&mut p, "m");
         assert_eq!(top_text(&p), "# Title");
@@ -999,7 +1236,7 @@ mod tests {
     #[test]
     fn help_overlay() {
         let d = doc(&[("a.txt", &numbered(50))]);
-        let mut p = Pager::new(&d, &OPTS, 80, 10);
+        let mut p = Pager::new(d, &OPTS, 80, 10);
         press(&mut p, " h");
         assert!(screen(&p).contains("mmore keys"));
         // Keys move the help, not the file; q closes help instead of quitting.
@@ -1012,7 +1249,7 @@ mod tests {
     fn line_number_gutter() {
         let mut d = doc(&[("a.txt", "short\nthis line is long enough to wrap\n")]);
         d.line_numbers = true;
-        let p = Pager::new(&d, &OPTS, 20, 10);
+        let p = Pager::new(d, &OPTS, 20, 10);
         let rows: Vec<String> = p.view.wrapped.rows.iter().map(Line::text).collect();
         // Content wraps at the width minus the 4-column gutter.
         assert_eq!(rows[1], "this line is lon");
@@ -1025,7 +1262,7 @@ mod tests {
     #[test]
     fn resize_keeps_search_highlights() {
         let d = doc(&[("a.txt", &numbered(40))]);
-        let mut p = Pager::new(&d, &OPTS, 80, 10);
+        let mut p = Pager::new(d, &OPTS, 80, 10);
         press(&mut p, "/line 30\n");
         p.resize(40, 20);
         assert!(screen(&p).contains("\x1b[7mline 30\x1b[0m"));
@@ -1042,6 +1279,7 @@ mod tests {
         let mut d = doc(&[]);
         d.files.push(File {
             name: "a.rs".into(),
+            path: None,
             content: Section::Code(Arc::clone(&lazy)),
             raw: plain::render(text),
             stream: None,
@@ -1050,7 +1288,7 @@ mod tests {
             color: ColorMode::TrueColor,
             ..OPTS
         };
-        let p = Pager::new(&d, &opts, 20, 10);
+        let p = Pager::new(d, &opts, 20, 10);
         assert!(p.highlighting());
         assert!(!screen(&p).contains("38;2;"));
         assert!(!p.newly_highlighted_on_screen(0));
@@ -1071,7 +1309,7 @@ mod tests {
     #[test]
     fn mouse_wheel_scrolls() {
         let d = doc(&[("a.txt", &numbered(50)), ("b.txt", "x\n")]);
-        let mut p = Pager::new(&d, &OPTS, 80, 10);
+        let mut p = Pager::new(d, &OPTS, 80, 10);
         assert!(p.mouse(MouseEventKind::ScrollDown));
         assert_eq!(top_text(&p), "line 4");
         assert!(p.mouse(MouseEventKind::ScrollUp));
@@ -1100,6 +1338,7 @@ mod tests {
         let mut d = doc(&[]);
         d.files.push(File {
             name: "(standard input)".into(),
+            path: None,
             content: Section::Plain,
             raw: Vec::new(),
             stream: Some(stream),
@@ -1120,7 +1359,7 @@ mod tests {
     fn streamed_input_is_shown_as_it_arrives() {
         use std::io::Write as _;
         let (d, mut w) = streamed();
-        let mut p = Pager::new(&d, &OPTS, 40, 5);
+        let mut p = Pager::new(d, &OPTS, 40, 5);
         assert!(p.reading());
         assert!(p.status().contains("(waiting for input)"));
         w.write_all(b"one\ntwo\n").unwrap();
@@ -1155,11 +1394,11 @@ mod tests {
         d.stream(0)
             .unwrap()
             .wait_for(12, Some(std::time::Duration::from_secs(5)));
-        let mut p = Pager::new(&d, &OPTS, 40, 5);
+        let mut p = Pager::new(d, &OPTS, 40, 5);
         assert_eq!(p.view.lines, 12);
         writeln!(w, "line 13").unwrap();
         drop(w);
-        d.stream(0).unwrap().wait_for(usize::MAX, None);
+        p.doc.stream(0).unwrap().wait_for(usize::MAX, None);
         // Not reading any more, but the last line and the end are still pending.
         assert!(!p.reading());
         assert!(p.pull_stream());
@@ -1173,7 +1412,7 @@ mod tests {
     fn follow_keeps_the_end_in_view() {
         use std::io::Write as _;
         let (d, mut w) = streamed();
-        let mut p = Pager::new(&d, &OPTS, 40, 5);
+        let mut p = Pager::new(d, &OPTS, 40, 5);
         for i in 1..=10 {
             writeln!(w, "line {i}").unwrap();
         }
@@ -1198,7 +1437,7 @@ mod tests {
     fn search_finds_streamed_lines() {
         use std::io::Write as _;
         let (d, mut w) = streamed();
-        let mut p = Pager::new(&d, &OPTS, 40, 5);
+        let mut p = Pager::new(d, &OPTS, 40, 5);
         w.write_all(b"a\nb\n").unwrap();
         pull(&mut p, 2);
         press(&mut p, "/needle\n");
@@ -1221,7 +1460,7 @@ mod tests {
             ..OPTS
         };
         let (d, mut w) = streamed();
-        let mut p = Pager::new(&d, &opts, 40, 5);
+        let mut p = Pager::new(d, &opts, 40, 5);
         w.write_all(b"x\n").unwrap();
         pull(&mut p, 1);
         assert_eq!(press(&mut p, " "), Flow::Continue);
@@ -1234,11 +1473,186 @@ mod tests {
     #[test]
     fn ctrl_z_suspends() {
         let d = doc(&[("a.txt", &numbered(5))]);
-        let mut p = Pager::new(&d, &OPTS, 40, 10);
+        let mut p = Pager::new(d, &OPTS, 40, 10);
         let ctrl_z = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
         assert_eq!(p.key(ctrl_z), Flow::Suspend);
         press(&mut p, "h");
         assert_eq!(p.key(ctrl_z), Flow::Suspend);
+    }
+
+    #[test]
+    fn counts_go_to_lines_and_percentages() {
+        let d = doc(&[("a.txt", &numbered(200))]);
+        let mut p = Pager::new(d, &OPTS, 40, 11);
+        press(&mut p, "120g");
+        assert_eq!(top_text(&p), "line 120");
+        press(&mut p, "3G");
+        assert_eq!(top_text(&p), "line 3");
+        press(&mut p, "50%");
+        assert_eq!(top_text(&p), "line 101");
+        press(&mut p, "0p");
+        assert_eq!(top_text(&p), "line 1");
+        press(&mut p, "5j");
+        assert_eq!(top_text(&p), "line 6");
+        press(&mut p, "2k");
+        assert_eq!(top_text(&p), "line 4");
+        // Past the end goes to the last screen; plain g and G still work.
+        press(&mut p, "999g");
+        assert!(p.view.vp.at_end());
+        press(&mut p, "g");
+        assert_eq!(top_text(&p), "line 1");
+    }
+
+    #[test]
+    fn count_is_shown_while_typing_and_esc_cancels_it() {
+        let d = doc(&[("a.txt", &numbered(50))]);
+        let mut p = Pager::new(d, &OPTS, 40, 10);
+        press(&mut p, "12");
+        assert!(plain_screen(&p).contains("12"));
+        press(&mut p, "\x1b");
+        assert!(p.count.is_none());
+        press(&mut p, "j");
+        assert_eq!(top_text(&p), "line 2");
+    }
+
+    #[test]
+    fn chopped_lines_scroll_sideways() {
+        let long = format!("start{}end", "-".repeat(60));
+        let d = doc(&[("a.txt", &format!("{long}\nshort\n"))]);
+        let opts = Options { chop: true, ..OPTS };
+        let mut p = Pager::new(d, &opts, 20, 5);
+        // One row per line, cut at the screen edge.
+        assert_eq!(p.view.wrapped.rows.len(), 2);
+        let s = plain_screen(&p);
+        assert!(
+            s.contains("start---------------") && !s.contains("end"),
+            "{s}"
+        );
+        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        for _ in 0..10 {
+            p.key(right);
+        }
+        // Scrolled to the end of the longest line, and no further.
+        assert_eq!(p.hscroll, 68 - 20);
+        assert!(plain_screen(&p).contains("-end"));
+        assert!(p.status().contains("[from column 49]"));
+        press(&mut p, "w");
+        assert_eq!(p.hscroll, 0);
+        assert!(p.view.wrapped.rows.len() > 2);
+        // Left/Right while wrapping explain how to cut lines off.
+        p.key(right);
+        assert!(p.message.as_deref().unwrap().contains("press w"));
+    }
+
+    #[test]
+    fn search_scrolls_sideways_to_the_match() {
+        let line = format!("{}needle", "x".repeat(100));
+        let d = doc(&[("a.txt", &format!("{line}\n"))]);
+        let opts = Options { chop: true, ..OPTS };
+        let mut p = Pager::new(d, &opts, 40, 5);
+        press(&mut p, "/needle\n");
+        assert!(p.hscroll > 60 && p.hscroll <= 100, "hscroll {}", p.hscroll);
+        assert!(screen(&p).contains("\x1b[7mneedle"));
+    }
+
+    #[test]
+    fn filter_shows_only_matching_lines() {
+        let text = "ok 1\nerror 2\nok 3\nERROR 4\nok 5\n";
+        let mut d = doc(&[("a.log", text)]);
+        d.line_numbers = true;
+        let mut p = Pager::new(d, &OPTS, 40, 10);
+        press(&mut p, "&error\n");
+        let rows: Vec<String> = p.view.wrapped.rows.iter().map(Line::text).collect();
+        // Smart case, like search; line numbers stay those of the file.
+        assert_eq!(rows, vec!["error 2", "ERROR 4"]);
+        assert!(plain_screen(&p).contains("  2 error 2"));
+        assert!(p.status().contains("[&error: 2 lines]"));
+        // Search works within the filtered lines.
+        press(&mut p, "/4\n");
+        assert_eq!(p.cursor.map(|c| c.0), Some(1));
+        press(&mut p, "&\n");
+        assert_eq!(p.view.wrapped.rows.len(), 5);
+        assert_eq!(p.message.as_deref(), Some("Showing all lines"));
+        press(&mut p, "&(\n");
+        assert!(p.message.as_deref().unwrap().starts_with("Invalid pattern"));
+    }
+
+    #[test]
+    fn filter_applies_to_streamed_input() {
+        use std::io::Write as _;
+        let (d, mut w) = streamed();
+        let mut p = Pager::new(d, &OPTS, 40, 5);
+        w.write_all(b"GET /a 200\nGET /b 500\n").unwrap();
+        pull(&mut p, 2);
+        press(&mut p, "&500\n");
+        w.write_all(b"GET /c 200\nGET /d 500\n").unwrap();
+        pull(&mut p, 4);
+        let rows: Vec<String> = p.view.wrapped.rows.iter().map(Line::text).collect();
+        assert_eq!(rows, vec!["GET /b 500", "GET /d 500"]);
+        assert_eq!(p.view.wrapped.line, vec![0, 1]);
+    }
+
+    #[test]
+    fn filtered_code_is_still_highlighted() {
+        use crate::document::LazyHighlight;
+        use std::sync::Arc;
+        let text = "fn a() {}\nlet x = 1;\nfn b() {}\n";
+        let syntax = assets::syntaxes().find_syntax_by_extension("rs").unwrap();
+        let theme = assets::theme(assets::DEFAULT_DARK_THEME).unwrap();
+        let lazy = Arc::new(LazyHighlight::new(text.into(), syntax, theme));
+        lazy.run();
+        let mut d = doc(&[]);
+        d.files.push(File {
+            name: "a.rs".into(),
+            path: None,
+            content: Section::Code(Arc::clone(&lazy)),
+            raw: plain::render(text),
+            stream: None,
+        });
+        let opts = Options {
+            color: ColorMode::TrueColor,
+            ..OPTS
+        };
+        let mut p = Pager::new(d, &opts, 40, 10);
+        press(&mut p, "&let\n");
+        // The one shown line is source line 2, highlighted as that line.
+        assert_eq!(p.row(&p.view, 0).text(), "let x = 1;");
+        assert!(p.row(&p.view, 0).spans.iter().any(|s| s.style.fg.is_some()));
+    }
+
+    #[test]
+    fn edit_targets_files_and_reload_replaces_content() {
+        let mut d = doc(&[("a.txt", &numbered(30))]);
+        d.files[0].path = Some("a.txt".into());
+        let reload = |_: &Path| -> Option<File> {
+            Some(File {
+                name: "a.txt".into(),
+                path: Some("a.txt".into()),
+                content: Section::Plain,
+                raw: plain::render("edited 1\nedited 2\n"),
+                stream: None,
+            })
+        };
+        let opts = Options {
+            reload: Some(&reload),
+            ..OPTS
+        };
+        let mut p = Pager::new(d, &opts, 40, 10);
+        press(&mut p, "5g");
+        assert_eq!(press(&mut p, "v"), Flow::Edit);
+        assert_eq!(p.edit_target(), Ok(("a.txt".into(), 5)));
+        p.reload();
+        assert_eq!(top_text(&p), "edited 1");
+    }
+
+    #[test]
+    fn piped_input_cannot_be_edited() {
+        let (d, _w) = streamed();
+        let p = Pager::new(d, &OPTS, 40, 5);
+        assert_eq!(
+            p.edit_target(),
+            Err("(standard input) cannot be opened in an editor".into())
+        );
     }
 
     #[test]

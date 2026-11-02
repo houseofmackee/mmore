@@ -78,7 +78,7 @@ fn main() -> ExitCode {
         When::Auto => stdout_is_tty && color.enabled() && ansi::hyperlinks_supported(),
     };
 
-    match output(&cli, &document, color, hyperlinks, stdout_is_tty) {
+    match output(&cli, &settings, document, color, hyperlinks, stdout_is_tty) {
         Ok(()) if all_ok => ExitCode::SUCCESS,
         Ok(()) => ExitCode::FAILURE,
         Err(e) => {
@@ -164,6 +164,7 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
             ];
             files.push(File {
                 name,
+                path: None,
                 content: Section::Plain,
                 raw: message,
                 stream: None,
@@ -205,6 +206,10 @@ fn text_file(cli: &Cli, origin: &Origin, text: String, settings: &Settings) -> F
     };
     File {
         name: origin.display_name(),
+        path: match origin {
+            Origin::File(path) => Some(path.clone()),
+            Origin::Stdin => None,
+        },
         raw,
         content,
         stream: None,
@@ -268,6 +273,7 @@ fn stream_input(
     stream.drop_text();
     File {
         name,
+        path: None,
         content: Section::Plain,
         raw: Vec::new(),
         stream: Some(stream),
@@ -296,7 +302,8 @@ fn content_kind(cli: &Cli, origin: &Origin, text: &str, settings: &Settings) -> 
 /// Page the document on a terminal, or print it when paging is off or pointless.
 fn output(
     cli: &Cli,
-    document: &Document,
+    settings: &Settings,
+    document: Document,
     color: ColorMode,
     hyperlinks: bool,
     stdout_is_tty: bool,
@@ -304,7 +311,7 @@ fn output(
     let size = crossterm::terminal::size().ok().filter(|_| stdout_is_tty);
     let Some((cols, rows)) = size.filter(|_| !cli.no_pager) else {
         let width = size.map_or(DEFAULT_WIDTH, |(cols, _)| cols as usize);
-        return print(document, width, color, hyperlinks);
+        return print(&document, width, color, hyperlinks);
     };
     // Short piped input is printed directly too: give it a moment to end, or to
     // fill the screen.
@@ -318,8 +325,14 @@ fn output(
     // Leave a row free so the shell prompt does not push the first line off screen.
     // Counting rows needs no highlighting, so big files go straight to the pager.
     if !cli.always_page && streams_done && document.fits(cols as usize, rows as usize) {
-        return print(document, cols as usize, color, hyperlinks);
+        return print(&document, cols as usize, color, hyperlinks);
     }
+    // After `v`, the edited file is loaded again the same way.
+    let reload = |path: &std::path::Path| -> Option<File> {
+        let origin = Origin::File(path.to_path_buf());
+        let source = Source::load(origin.clone()).ok()?;
+        Some(text_file(cli, &origin, source.text(), settings))
+    };
     pager::run(
         document,
         &pager::Options {
@@ -327,6 +340,8 @@ fn output(
             color,
             hyperlinks,
             mouse: cli.mouse,
+            chop: cli.chop_long_lines,
+            reload: Some(&reload),
         },
     )
 }

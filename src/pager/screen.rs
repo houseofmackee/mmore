@@ -42,6 +42,14 @@ impl Screen {
         Ok(())
     }
 
+    /// Give the terminal back while `run` runs (an editor), then take it again.
+    pub fn outside<T>(&self, run: impl FnOnce() -> T) -> io::Result<T> {
+        restore();
+        let result = run();
+        self.setup()?;
+        Ok(result)
+    }
+
     /// Ctrl-Z: give the terminal back and stop, like any job; continue after `fg`.
     /// Raw mode turns off the terminal's own Ctrl-Z handling, so this does it: it
     /// stops the whole process group, as the terminal would.

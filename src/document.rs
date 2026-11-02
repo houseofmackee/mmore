@@ -145,6 +145,8 @@ impl LazyHighlight {
 
 pub struct File {
     pub name: String,
+    /// Where it came from on disk, if it can be opened in an editor.
+    pub path: Option<std::path::PathBuf>,
     pub content: Section,
     /// The source as plain lines (tabs expanded, control characters escaped).
     /// Empty for streamed input, whose lines are in `stream`.
@@ -225,11 +227,16 @@ impl Document {
 
     /// Start highlighting every code file in the background.
     pub fn start_highlighting(&self) {
-        for file in &self.files {
-            if let Section::Code(lazy) = &file.content {
-                let lazy = Arc::clone(lazy);
-                thread::spawn(move || lazy.run());
-            }
+        for index in 0..self.files.len() {
+            self.start_highlighting_file(index);
+        }
+    }
+
+    /// Start highlighting one code file in the background (once).
+    pub fn start_highlighting_file(&self, index: usize) {
+        if let Section::Code(lazy) = &self.files[index].content {
+            let lazy = Arc::clone(lazy);
+            thread::spawn(move || lazy.run());
         }
     }
 
@@ -387,6 +394,7 @@ mod tests {
     fn file(name: &str, content: Section, raw: &str) -> File {
         File {
             name: name.into(),
+            path: None,
             content,
             raw: plain::render(raw),
             stream: None,

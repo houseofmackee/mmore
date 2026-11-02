@@ -380,6 +380,52 @@ def background():
     check("no background query without colors", b"\x1b]11;?" not in out)
 
 
+def less_keys(tmp, n100):
+    # A count before g, %, and j: go to a line, a percentage, or move N lines.
+    out, code, snaps = run(f"{BIN} {n100}", ["4", "2", "g", "5", "0", "%", "q"], rows=10, cols=40)
+    check("42g goes to line 42", "\x1b[1;1H\x1b[2K42" in after(snaps, 2))
+    check("50% goes halfway", "\x1b[1;1H\x1b[2K51" in after(snaps, 5))
+    check("a count shows while typing", "\x1b[10;1H\x1b[2K4" in after(snaps, 0))
+
+    # -S cuts long lines off; Right scrolls sideways; w wraps again.
+    wide = os.path.join(tmp, "wide.txt")
+    with open(wide, "w") as f:
+        f.write("left" + "." * 50 + "right\n" + "short\n")
+    # Each Right scrolls half a screen: two reach the end of a 59-column line.
+    out, code, snaps = run(f"{BIN} -S --always-page {wide}", ["\x1b[C", "\x1b[C", "w", "q"], rows=10, cols=30)
+    first = snaps[0].decode(errors="replace")
+    check("-S cuts long lines off", "left" in first and "right" not in first)
+    check("Right scrolls sideways", "right" in after(snaps, 1) and "from column" in after(snaps, 1))
+    check("w wraps long lines again", "Long lines wrap" in after(snaps, 2))
+
+    # &pattern shows only matching lines.
+    log = os.path.join(tmp, "app.log")
+    with open(log, "w") as f:
+        f.write("".join(f"{'ERROR' if i % 10 == 0 else 'info'} event {i}\n" for i in range(1, 101)))
+    out, code, snaps = run(f"{BIN} {log}", ["&", "E", "R", "R", "\r", "q"], rows=12, cols=40)
+    filtered = after(snaps, 4)
+    check("&ERR shows only matching lines", "ERROR event 10" in filtered and "info event" not in filtered and "[&ERR: 10 lines]" in filtered)
+
+    # v opens the editor at the current line, and the file is reloaded after.
+    bin_dir = os.path.join(tmp, "editor-bin")
+    os.mkdir(bin_dir)
+    fake = os.path.join(bin_dir, "vim")
+    record = os.path.join(tmp, "editor-args.txt")
+    with open(fake, "w") as f:
+        f.write(f'#!/bin/sh\necho "$@" > {record}\nfor last; do :; done\necho "added by the editor" >> "$last"\n')
+    os.chmod(fake, 0o755)
+    edited = os.path.join(tmp, "edit-me.txt")
+    with open(edited, "w") as f:
+        f.write("".join(f"{i}\n" for i in range(1, 31)))
+    # WAIT: a freshly written script can take a moment to start the first time.
+    out, code, snaps = run(f"{BIN} {edited}", ["1", "5", "g", "v", "WAIT", "G", "q"], rows=10, cols=40, env={"EDITOR": fake})
+    args = open(record).read().strip() if os.path.exists(record) else ""
+    check("v runs the editor at the current line", args == f"+15 {edited}", args)
+    handover = snaps[5][len(snaps[3]):].decode(errors="replace")
+    check("the terminal is handed to the editor and taken back", ALT_OFF in handover and ALT_ON in handover)
+    check("the file is reloaded after editing", "added by the editor" in after(snaps, 5) and code == 0)
+
+
 def input_colors(tmp):
     log = os.path.join(tmp, "colors.log")
     with open(log, "w") as f:
@@ -501,6 +547,7 @@ def main():
         links = hyperlinks(tmp)
         pager_features(n100, links)
         mouse(n100)
+        less_keys(tmp, n100)
         input_colors(tmp)
         streaming()
         suspend(n100)

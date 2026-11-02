@@ -66,26 +66,34 @@ somewhere else, add `--root DIR` (the binary goes in `DIR/bin`).
 | `k`, `Up` | Previous line |
 | `d` / `u` | Half a page down / up |
 | `g`, `Home` / `G`, `End` | Top / bottom |
+| `120g`, `50%` | Go to line 120, or halfway (type the number first; `5j` moves 5 lines) |
+| `w` | Wrap long lines, or cut them off at the screen edge |
+| `Left` / `Right` | Scroll sideways when long lines are cut off |
 | Mouse wheel | Scroll 3 lines (with `--mouse`) |
 | `F` | Follow new input at the end, as with `tail -f` (any key stops) |
 | `/pattern`, `?pattern` | Search forward / backward |
+| `&pattern` | Show only lines that match (`&` and Enter shows all again) |
 | `n` / `N` | Next / previous match |
 | `Esc` | Clear search highlighting |
 | `:n` / `:p` | Next / previous file |
 | `=`, `:f`, `Ctrl-G` | Show the file name and line number |
 | `m` | Switch between the rendered view and the raw source |
+| `v` | Edit the file in `$VISUAL` or `$EDITOR`, at the current line, then reload it |
 | `h` | Help |
 | `Ctrl-Z` | Suspend (`fg` resumes) |
 | `q`, `:q`, `Ctrl-C` | Quit |
 
-Searches are regular expressions. They ignore case unless the pattern contains an
-uppercase letter. An empty pattern repeats the previous search.
+Searches and filters are regular expressions. They ignore case unless the pattern
+contains an uppercase letter. An empty search pattern repeats the previous search.
+A filter also applies to piped input as it arrives, so `tail -f app.log | mmore`
+followed by `&error` shows new errors only.
 
 ## Options
 
 | Option | Effect |
 |--------|--------|
 | `-n`, `--line-numbers` | Show source line numbers (in rendered Markdown, the line where each block starts) |
+| `-S`, `--chop-long-lines` | Cut long lines off at the screen edge instead of wrapping them |
 | `-p`, `--plain` | Show files as plain text, without rendering or highlighting |
 | `-l`, `--language LANG` | Treat the input as `LANG`, by name or extension (`rust`, `py`, `md`) |
 | `--theme NAME` | Highlighting theme; `--list-themes` shows the choices |

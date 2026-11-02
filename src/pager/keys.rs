@@ -26,6 +26,18 @@ pub enum Action {
     Follow,
     /// Stop the process (Ctrl-Z).
     Suspend,
+    /// A digit of a count, as in `120g` (line 120) or `50%`.
+    Digit(u8),
+    /// Go to a percentage of the file (`%` or `p`, after a count).
+    Percent,
+    /// Turn wrapping of long lines on or off.
+    ToggleWrap,
+    ScrollLeft,
+    ScrollRight,
+    /// Open the file in an editor.
+    Edit,
+    /// Show only matching lines (`&pattern`).
+    Filter,
     Quit,
     None,
 }
@@ -73,6 +85,13 @@ pub fn map(key: KeyEvent) -> Action {
         KeyCode::Char('m') => Action::ToggleRaw,
         KeyCode::Char('h' | 'H') | KeyCode::F(1) => Action::Help,
         KeyCode::Char('F') => Action::Follow,
+        KeyCode::Char(c @ '0'..='9') => Action::Digit(c as u8 - b'0'),
+        KeyCode::Char('%' | 'p') => Action::Percent,
+        KeyCode::Char('w') => Action::ToggleWrap,
+        KeyCode::Left => Action::ScrollLeft,
+        KeyCode::Right => Action::ScrollRight,
+        KeyCode::Char('v') => Action::Edit,
+        KeyCode::Char('&') => Action::Filter,
         _ => Action::None,
     }
 }
@@ -171,6 +190,12 @@ mod tests {
         // Ctrl-N still moves a line, it is not "next match".
         assert_eq!(map(ctrl('n')), Action::LineDown);
         assert_eq!(map(key(KeyCode::Char('F'))), Action::Follow);
+        assert_eq!(map(key(KeyCode::Char('7'))), Action::Digit(7));
+        assert_eq!(map(key(KeyCode::Char('%'))), Action::Percent);
+        assert_eq!(map(key(KeyCode::Char('w'))), Action::ToggleWrap);
+        assert_eq!(map(key(KeyCode::Right)), Action::ScrollRight);
+        assert_eq!(map(key(KeyCode::Char('v'))), Action::Edit);
+        assert_eq!(map(key(KeyCode::Char('&'))), Action::Filter);
         assert_eq!(map(ctrl('z')), Action::Suspend);
     }
 

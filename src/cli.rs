@@ -95,6 +95,11 @@ pub struct Cli {
     #[arg(short = 'n', long)]
     pub line_numbers: bool,
 
+    /// Cut long lines off at the screen edge instead of wrapping them (scroll
+    /// sideways with Left and Right; w toggles while paging).
+    #[arg(short = 'S', long)]
+    pub chop_long_lines: bool,
+
     /// Syntax highlighting theme (see --list-themes).
     #[arg(long, value_name = "NAME")]
     pub theme: Option<String>,

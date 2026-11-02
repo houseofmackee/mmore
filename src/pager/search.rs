@@ -45,6 +45,11 @@ impl Search {
         })
     }
 
+    /// Whether `text` contains a match (for the `&` filter).
+    pub fn is_match(&self, text: &str) -> bool {
+        self.regex.is_match(text)
+    }
+
     /// Non-empty matches in `text`, as character ranges.
     fn line_matches(&self, text: &str) -> Vec<Range<usize>> {
         let mut ranges = Vec::new();
