@@ -48,7 +48,7 @@ impl Viewport {
             Action::HalfUp => self.up(half),
             Action::Top => self.top = 0,
             Action::Bottom => self.top = self.max_top(),
-            Action::Quit | Action::None => {}
+            _ => {}
         }
     }
 

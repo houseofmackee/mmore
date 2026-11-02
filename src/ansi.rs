@@ -15,7 +15,10 @@ pub enum When {
 /// What the output terminal can display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ColorMode {
+    /// No escape sequences at all.
     None,
+    /// Text attributes (bold, underline, reverse) but no colors, for NO_COLOR.
+    Mono,
     Ansi16,
     Ansi256,
     TrueColor,
@@ -31,8 +34,10 @@ impl ColorMode {
             When::Auto => {
                 // https://no-color.org: any non-empty value disables color.
                 let no_color = env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
-                if !is_tty || no_color {
+                if !is_tty {
                     ColorMode::None
+                } else if no_color {
+                    ColorMode::Mono
                 } else {
                     depth(&colorterm, &term)
                 }
@@ -40,8 +45,9 @@ impl ColorMode {
         }
     }
 
+    /// Whether colors (not just attributes) can be shown.
     pub fn enabled(self) -> bool {
-        self != ColorMode::None
+        self >= ColorMode::Ansi16
     }
 }
 
@@ -146,6 +152,12 @@ fn sgr_params(style: &Style, mode: ColorMode) -> Vec<String> {
     }
     if style.strike {
         p.push("9".to_string());
+    }
+    if style.reverse {
+        p.push("7".to_string());
+    }
+    if mode == ColorMode::Mono {
+        return p;
     }
     if let Some(c) = style.fg {
         p.push(color_param(c, mode, false));
@@ -269,6 +281,27 @@ mod tests {
         assert_eq!(
             render(&line(red()), ColorMode::Ansi16, None),
             "\x1b[1;91mx\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn mono_keeps_attributes_but_drops_colors() {
+        assert_eq!(
+            render(&line(red()), ColorMode::Mono, None),
+            "\x1b[1mx\x1b[0m"
+        );
+        let only_color = Style {
+            fg: Some(Color::Ansi(2)),
+            ..Style::default()
+        };
+        assert_eq!(render(&line(only_color), ColorMode::Mono, None), "x");
+        let reverse = Style {
+            reverse: true,
+            ..Style::default()
+        };
+        assert_eq!(
+            render(&line(reverse), ColorMode::Mono, None),
+            "\x1b[7mx\x1b[0m"
         );
     }
 

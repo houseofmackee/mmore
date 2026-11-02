@@ -21,6 +21,10 @@ pub struct Cli {
     #[arg(short, long, value_name = "LANG")]
     pub language: Option<String>,
 
+    /// Show source line numbers.
+    #[arg(short = 'n', long)]
+    pub line_numbers: bool,
+
     /// Syntax highlighting theme (see --list-themes).
     #[arg(long, value_name = "NAME")]
     pub theme: Option<String>,

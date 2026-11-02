@@ -18,7 +18,7 @@ use syntect::highlighting::Theme;
 use ansi::{ColorMode, When};
 use cli::Cli;
 use detect::Kind;
-use document::{Document, Section};
+use document::{Document, File, Section};
 use render::Rendered;
 use source::{Origin, Source};
 use style::Line;
@@ -110,8 +110,7 @@ fn report(e: io::Error) {
 /// Load every input into a document. Errors are reported on stderr as they
 /// happen; the flag is false if any input could not be shown.
 fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, bool) {
-    let multiple = origins.len() > 1;
-    let mut sections = Vec::new();
+    let mut files = Vec::new();
     let mut all_ok = true;
 
     for origin in origins {
@@ -125,43 +124,42 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
         };
         let name = source.origin.display_name();
 
-        if multiple {
-            // Separator between files, in the same style as `more`.
-            let bar = ":".repeat(14);
-            sections.push(Section::Fixed(vec![
-                Line::plain(&bar),
-                Line::plain(&name),
-                Line::plain(bar),
-            ]));
-        }
-
         if source.is_binary() && !cli.force {
-            sections.push(Section::Fixed(vec![
+            let message = vec![
                 Line::default(),
                 Line::plain(format!("******** {name}: Not a text file ********")),
                 Line::default(),
-            ]));
+            ];
+            files.push(File {
+                name,
+                content: Section::Plain,
+                raw: message,
+            });
             continue;
         }
 
-        sections.push(section(cli, &source.origin, source.text(), settings));
+        let text = source.text();
+        let raw = render::plain::render(&text);
+        let content = section(cli, &source.origin, text, settings);
+        files.push(File { name, content, raw });
     }
 
     let document = Document {
-        sections,
+        files,
         width: cli.width.map(usize::from),
         max_width: cli.max_width.into(),
         highlight: settings.highlight,
         theme: settings.theme,
         ascii: cli.ascii,
         front_matter: !cli.no_front_matter,
+        line_numbers: cli.line_numbers,
     };
     (document, all_ok)
 }
 
 fn section(cli: &Cli, origin: &Origin, text: String, settings: &Settings) -> Section {
     if !settings.render {
-        return Section::Fixed(render::plain::render(&text));
+        return Section::Plain;
     }
     let first_line = text.lines().next().unwrap_or("");
     let kind = detect::detect(
@@ -175,7 +173,7 @@ fn section(cli: &Cli, origin: &Origin, text: String, settings: &Settings) -> Sec
         Kind::Code(syntax) if settings.highlight && render::code::should_highlight(&text) => {
             Section::Fixed(render::code::render(&text, syntax, settings.theme))
         }
-        Kind::Code(_) | Kind::Plain => Section::Fixed(render::plain::render(&text)),
+        Kind::Code(_) | Kind::Plain => Section::Plain,
     }
 }
 
@@ -190,9 +188,9 @@ fn output(
     let size = crossterm::terminal::size().ok().filter(|_| stdout_is_tty);
     let Some((cols, rows)) = size.filter(|_| !cli.no_pager) else {
         let width = size.map_or(DEFAULT_WIDTH, |(cols, _)| cols as usize);
-        return dump(&document.render(width), color, hyperlinks);
+        return dump(&document.render_all(width), color, hyperlinks);
     };
-    let rendered = document.render(cols as usize);
+    let rendered = document.render_all(cols as usize);
     // Leave a row free so the shell prompt does not push the first line off screen.
     if !cli.always_page && wrap::row_count(&rendered.lines, cols as usize) < rows as usize {
         return dump(&rendered, color, hyperlinks);

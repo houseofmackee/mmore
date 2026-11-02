@@ -165,7 +165,7 @@ Walk the `pulldown-cmark` event stream with a style stack and a block-context st
 
 | Key                         | Action                                       |
 |-----------------------------|----------------------------------------------|
-| `Space`, `f`, `PgDn`        | Next page                                    |
+| `Space`, `f`, `PgDn`        | Next page (at the end of a file: next file)  |
 | `b`, `PgUp`                 | Previous page                                |
 | `Enter`, `j`, `↓`           | Next line                                    |
 | `k`, `↑`                    | Previous line                                |
@@ -196,7 +196,8 @@ mmore [OPTIONS] [FILE]...
 Options:
   -p, --plain              Disable Markdown rendering and highlighting
   -l, --language <LANG>    Force syntax (e.g. rust, python, markdown)
-  -n, --line-numbers       Show source line numbers in the gutter
+  -n, --line-numbers       Show source line numbers in the gutter (in rendered Markdown,
+                           numbers mark where each block starts)
       --theme <NAME>       Syntect theme
       --list-themes        List available themes and exit
       --list-languages     List supported languages and exit

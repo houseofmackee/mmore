@@ -12,6 +12,16 @@ pub enum Action {
     HalfUp,
     Top,
     Bottom,
+    SearchForward,
+    SearchBackward,
+    NextMatch,
+    PrevMatch,
+    ClearSearch,
+    /// Start a `:` command (`:n`, `:p`, `:f`, `:q`).
+    Command,
+    ShowPosition,
+    ToggleRaw,
+    Help,
     Quit,
     None,
 }
@@ -36,6 +46,7 @@ pub fn map(key: KeyEvent) -> Action {
         KeyCode::Char('u') if ctrl => Action::HalfUp,
         KeyCode::Char('n') if ctrl => Action::LineDown,
         KeyCode::Char('p') if ctrl => Action::LineUp,
+        KeyCode::Char('g') if ctrl => Action::ShowPosition,
         _ if ctrl => Action::None,
 
         KeyCode::Char('q' | 'Q') => Action::Quit,
@@ -47,6 +58,15 @@ pub fn map(key: KeyEvent) -> Action {
         KeyCode::Char('u') => Action::HalfUp,
         KeyCode::Char('g' | '<') | KeyCode::Home => Action::Top,
         KeyCode::Char('G' | '>') | KeyCode::End => Action::Bottom,
+        KeyCode::Char('/') => Action::SearchForward,
+        KeyCode::Char('?') => Action::SearchBackward,
+        KeyCode::Char('n') => Action::NextMatch,
+        KeyCode::Char('N') => Action::PrevMatch,
+        KeyCode::Esc => Action::ClearSearch,
+        KeyCode::Char(':') => Action::Command,
+        KeyCode::Char('=') => Action::ShowPosition,
+        KeyCode::Char('m') => Action::ToggleRaw,
+        KeyCode::Char('h' | 'H') | KeyCode::F(1) => Action::Help,
         _ => Action::None,
     }
 }
@@ -76,6 +96,20 @@ mod tests {
         assert_eq!(map(ctrl('c')), Action::Quit);
         assert_eq!(map(ctrl('d')), Action::HalfDown);
         assert_eq!(map(ctrl('q')), Action::None);
+    }
+
+    #[test]
+    fn search_and_feature_keys() {
+        assert_eq!(map(key(KeyCode::Char('/'))), Action::SearchForward);
+        assert_eq!(map(key(KeyCode::Char('?'))), Action::SearchBackward);
+        assert_eq!(map(key(KeyCode::Char('n'))), Action::NextMatch);
+        assert_eq!(map(key(KeyCode::Char('N'))), Action::PrevMatch);
+        assert_eq!(map(key(KeyCode::Char(':'))), Action::Command);
+        assert_eq!(map(key(KeyCode::Char('='))), Action::ShowPosition);
+        assert_eq!(map(key(KeyCode::Char('m'))), Action::ToggleRaw);
+        assert_eq!(map(key(KeyCode::Char('h'))), Action::Help);
+        // Ctrl-N still moves a line, it is not "next match".
+        assert_eq!(map(ctrl('n')), Action::LineDown);
     }
 
     #[test]

@@ -380,3 +380,23 @@ fn front_matter_can_be_hidden() {
         .stdout(predicate::str::contains("front matter").not())
         .stdout(predicate::str::contains("title: Extended").not());
 }
+
+#[test]
+fn line_numbers_when_printing() {
+    mmore_env()
+        .args(["-n", "tests/fixtures/hello.txt"])
+        .assert()
+        .success()
+        .stdout("  1 hello\n  2 world\n");
+}
+
+#[test]
+fn line_numbers_with_several_files_skip_headers() {
+    mmore_env()
+        .args(["-n", "tests/fixtures/hello.txt", "tests/fixtures/sample.md"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "::::::::::::::\ntests/fixtures/sample.md\n::::::::::::::\n  1 # Title\n",
+        ));
+}

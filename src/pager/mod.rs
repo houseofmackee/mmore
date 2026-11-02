@@ -1,27 +1,36 @@
 //! Interactive pager.
+//!
+//! `Pager` holds all state and handles keys; `run` connects it to the terminal.
+//! Files are shown one at a time (`:n` and `:p` switch), each remembering its
+//! scroll position.
 
+mod help;
 mod keys;
 mod screen;
+mod search;
 mod viewport;
 
 use std::io::{self, BufWriter, Write};
 
-use crossterm::cursor::MoveTo;
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::cursor::{self, MoveTo};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::queue;
 use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::terminal::{self, Clear, ClearType};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ansi::{self, ColorMode};
-use crate::document::Document;
+use crate::document::{Document, gutter_span};
+use crate::render::Rendered;
+use crate::style::Line;
 use crate::wrap::{Wrapped, wrap_all};
 use keys::Action;
 use screen::Screen;
+use search::{RowMatches, Search};
 use viewport::Viewport;
 
 pub struct Options {
-    /// Quit when moving forward while the last page is already shown (classic `more`).
+    /// Quit when moving forward past the end of the last file (classic `more`).
     pub exit_at_eof: bool,
     pub color: ColorMode,
     /// Emit OSC 8 hyperlinks.
@@ -30,36 +39,25 @@ pub struct Options {
 
 /// Page the document interactively until the user quits.
 pub fn run(document: &Document, opts: &Options) -> io::Result<()> {
+    if document.files.is_empty() {
+        return Ok(());
+    }
     let _screen = Screen::enter()?;
     let mut out = BufWriter::new(io::stdout());
-
-    let (mut cols, rows) = terminal::size()?;
-    let layout = |cols: u16| wrap_all(&document.render(cols as usize), cols as usize);
-    let mut wrapped = layout(cols);
-    let mut vp = Viewport::new(wrapped.rows.len(), content_height(rows));
-
+    let (cols, rows) = terminal::size()?;
+    let mut pager = Pager::new(document, opts, cols, rows);
     loop {
-        draw(&mut out, &wrapped, &vp, cols, opts)?;
+        pager.draw(&mut out)?;
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                let action = keys::map(key);
-                if action == Action::Quit
-                    || (opts.exit_at_eof && vp.at_end() && action.moves_forward())
-                {
+                if pager.key(key) == Flow::Quit {
                     break;
                 }
-                vp.apply(action);
             }
             Event::Resize(..) => {
                 // Query again: the size in the event can be stale during a drag.
-                let (new_cols, new_rows) = terminal::size()?;
-                let anchor = wrapped.source.get(vp.top).copied().unwrap_or(0);
-                if new_cols != cols {
-                    cols = new_cols;
-                    wrapped = layout(cols);
-                }
-                let top = wrapped.first_row_of(anchor);
-                vp.reset(wrapped.rows.len(), content_height(new_rows), top);
+                let (cols, rows) = terminal::size()?;
+                pager.resize(cols, rows);
             }
             _ => {}
         }
@@ -67,57 +65,425 @@ pub fn run(document: &Document, opts: &Options) -> io::Result<()> {
     Ok(())
 }
 
-fn content_height(rows: u16) -> usize {
-    (rows as usize).saturating_sub(1).max(1)
+#[derive(Debug, PartialEq, Eq)]
+enum Flow {
+    Continue,
+    Quit,
 }
 
-fn draw(
-    out: &mut impl Write,
-    wrapped: &Wrapped,
-    vp: &Viewport,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptKind {
+    Search { backward: bool },
+    Command,
+}
+
+/// One laid-out screenful source: rows plus scroll position.
+struct View {
+    rendered: Rendered,
+    wrapped: Wrapped,
+    vp: Viewport,
+    /// Width of the line number gutter (0 when off).
+    gutter: usize,
+    matches: RowMatches,
+}
+
+impl View {
+    /// Source line at the top of the screen, used to keep the place on re-layout.
+    fn anchor(&self) -> usize {
+        self.wrapped.source.get(self.vp.top).copied().unwrap_or(0)
+    }
+}
+
+struct Pager<'a> {
+    doc: &'a Document,
+    opts: &'a Options,
     cols: u16,
-    opts: &Options,
-) -> io::Result<()> {
-    let links = opts.hyperlinks.then_some(wrapped.links.as_slice());
-    for i in 0..vp.height {
-        // Clear before printing: clearing after a full-width row would erase its last cell.
-        queue!(out, MoveTo(0, i as u16), Clear(ClearType::CurrentLine))?;
-        if let Some(row) = wrapped.rows.get(vp.top + i) {
-            queue!(out, Print(ansi::render(row, opts.color, links)))?;
+    rows: u16,
+    file: usize,
+    /// Saved anchor (source line) for each file.
+    positions: Vec<usize>,
+    raw: bool,
+    view: View,
+    help: Option<View>,
+    prompt: Option<(PromptKind, String)>,
+    search: Option<Search>,
+    /// Row of the last match jumped to, with the scroll position at that time.
+    /// `n` continues from there as long as the user has not scrolled since.
+    cursor: Option<(usize, usize)>,
+    message: Option<String>,
+}
+
+impl<'a> Pager<'a> {
+    fn new(doc: &'a Document, opts: &'a Options, cols: u16, rows: u16) -> Self {
+        let mut pager = Pager {
+            doc,
+            opts,
+            cols,
+            rows,
+            file: 0,
+            positions: vec![0; doc.files.len()],
+            raw: false,
+            view: empty_view(),
+            help: None,
+            prompt: None,
+            search: None,
+            cursor: None,
+            message: None,
+        };
+        pager.layout(0);
+        pager
+    }
+
+    fn content_height(&self) -> usize {
+        (self.rows as usize).saturating_sub(1).max(1)
+    }
+
+    /// Lay out the current file at the current size, scrolled to `anchor`.
+    fn layout(&mut self, anchor: usize) {
+        let gutter = self.doc.gutter_width(self.file);
+        let width = (self.cols as usize).saturating_sub(gutter).max(1);
+        let rendered = self.doc.render_file(self.file, width, self.raw);
+        let wrapped = wrap_all(&rendered, width);
+        let matches = self
+            .search
+            .as_ref()
+            .map(|s| s.row_matches(&rendered, &wrapped))
+            .unwrap_or_default();
+        let mut vp = Viewport::new(wrapped.rows.len(), self.content_height());
+        let top = wrapped.first_row_of(anchor);
+        vp.reset(wrapped.rows.len(), self.content_height(), top);
+        self.view = View {
+            rendered,
+            wrapped,
+            vp,
+            gutter,
+            matches,
+        };
+        self.cursor = None;
+    }
+
+    fn layout_help(&mut self) {
+        let mut rendered = Rendered::default();
+        for (i, line) in help::lines().into_iter().enumerate() {
+            rendered.push(line, i);
+        }
+        let wrapped = wrap_all(&rendered, self.cols as usize);
+        let vp = Viewport::new(wrapped.rows.len(), self.content_height());
+        self.help = Some(View {
+            rendered,
+            wrapped,
+            vp,
+            gutter: 0,
+            matches: RowMatches::default(),
+        });
+    }
+
+    fn resize(&mut self, cols: u16, rows: u16) {
+        self.cols = cols;
+        self.rows = rows;
+        let anchor = self.view.anchor();
+        self.layout(anchor);
+        if let Some(help) = &self.help {
+            let top = help.vp.top;
+            self.layout_help();
+            let height = self.content_height();
+            if let Some(help) = &mut self.help {
+                let total = help.wrapped.rows.len();
+                help.vp.reset(total, height, top);
+            }
         }
     }
 
-    let status = status_text(vp);
-    // Stay short of the last column so the terminal never scrolls.
-    let status = truncate(&status, (cols as usize).saturating_sub(1));
-    queue!(
-        out,
-        MoveTo(0, vp.height as u16),
-        Clear(ClearType::CurrentLine),
-        SetAttribute(Attribute::Reverse),
-        Print(status),
-        SetAttribute(Attribute::Reset),
-    )?;
-    out.flush()
-}
+    fn switch_file(&mut self, file: usize) {
+        self.positions[self.file] = self.view.anchor();
+        self.file = file;
+        self.layout(self.positions[file]);
+    }
 
-fn status_text(vp: &Viewport) -> String {
-    if vp.at_end() {
-        "(END)".to_string()
-    } else {
-        format!("--More--({}%)", vp.percent())
+    fn key(&mut self, key: KeyEvent) -> Flow {
+        self.message = None;
+        if let Some((kind, input)) = self.prompt.take() {
+            return self.prompt_key(kind, input, key);
+        }
+        let action = keys::map(key);
+
+        if let Some(help) = &mut self.help {
+            match action {
+                Action::Quit | Action::Help | Action::ClearSearch => self.help = None,
+                _ => help.vp.apply(action),
+            }
+            return Flow::Continue;
+        }
+
+        match action {
+            Action::Quit => return Flow::Quit,
+            Action::SearchForward => {
+                self.prompt = Some((PromptKind::Search { backward: false }, String::new()));
+            }
+            Action::SearchBackward => {
+                self.prompt = Some((PromptKind::Search { backward: true }, String::new()));
+            }
+            Action::Command => self.prompt = Some((PromptKind::Command, String::new())),
+            Action::NextMatch => self.next_match(false),
+            Action::PrevMatch => self.next_match(true),
+            Action::ClearSearch => {
+                self.search = None;
+                self.view.matches = RowMatches::default();
+                self.cursor = None;
+            }
+            Action::ShowPosition => self.message = Some(self.position()),
+            Action::ToggleRaw => {
+                let anchor = self.view.anchor();
+                self.raw = !self.raw;
+                self.layout(anchor);
+                let what = if self.raw {
+                    "raw source"
+                } else {
+                    "rendered view"
+                };
+                self.message = Some(format!("Showing {what}"));
+            }
+            Action::Help => self.layout_help(),
+            Action::None => {}
+            movement => {
+                if self.view.vp.at_end() && movement.moves_forward() {
+                    let has_next = self.file + 1 < self.doc.files.len();
+                    if has_next && (movement == Action::PageDown || self.opts.exit_at_eof) {
+                        self.switch_file(self.file + 1);
+                        return Flow::Continue;
+                    }
+                    if !has_next && self.opts.exit_at_eof {
+                        return Flow::Quit;
+                    }
+                }
+                self.view.vp.apply(movement);
+            }
+        }
+        Flow::Continue
+    }
+
+    fn prompt_key(&mut self, kind: PromptKind, mut input: String, key: KeyEvent) -> Flow {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => {}
+            KeyCode::Char('c' | 'g') if ctrl => {}
+            KeyCode::Char('u') if ctrl => self.prompt = Some((kind, String::new())),
+            KeyCode::Backspace => {
+                // Backspace on an empty prompt cancels it, as in less.
+                if input.pop().is_some() {
+                    self.prompt = Some((kind, input));
+                }
+            }
+            KeyCode::Enter => {
+                if let PromptKind::Search { backward } = kind {
+                    self.start_search(&input, backward);
+                }
+            }
+            KeyCode::Char(c) if !ctrl => match kind {
+                PromptKind::Command => return self.command(c),
+                PromptKind::Search { .. } => {
+                    input.push(c);
+                    self.prompt = Some((kind, input));
+                }
+            },
+            _ => self.prompt = Some((kind, input)),
+        }
+        Flow::Continue
+    }
+
+    /// `:` commands take effect on their first character, as in `more`.
+    fn command(&mut self, c: char) -> Flow {
+        let files = self.doc.files.len();
+        match c {
+            'n' if self.file + 1 < files => self.switch_file(self.file + 1),
+            'n' => self.message = Some("No next file".into()),
+            'p' if self.file > 0 => self.switch_file(self.file - 1),
+            'p' => self.message = Some("No previous file".into()),
+            'f' => self.message = Some(self.position()),
+            'q' => return Flow::Quit,
+            _ => self.message = Some(format!("Unknown command :{c} (h for help)")),
+        }
+        Flow::Continue
+    }
+
+    fn start_search(&mut self, input: &str, backward: bool) {
+        // An empty pattern repeats the previous one, as in less.
+        let pattern = match (input.is_empty(), &self.search) {
+            (true, Some(previous)) => previous.pattern.clone(),
+            (true, None) => return,
+            (false, _) => input.to_string(),
+        };
+        match Search::new(&pattern, backward) {
+            Ok(search) => {
+                self.view.matches = search.row_matches(&self.view.rendered, &self.view.wrapped);
+                self.search = Some(search);
+                self.cursor = None;
+                self.jump(!backward, true);
+            }
+            Err(e) => self.message = Some(e),
+        }
+    }
+
+    /// `n` (or `N` with `reverse`) in the direction of the current search.
+    fn next_match(&mut self, reverse: bool) {
+        let Some(search) = &self.search else {
+            self.message = Some("No previous search (/ to search)".into());
+            return;
+        };
+        let forward = search.backward == reverse;
+        self.jump(forward, false);
+    }
+
+    fn jump(&mut self, forward: bool, new_search: bool) {
+        let vp = &mut self.view.vp;
+        // Continue from the last match unless the user scrolled away from it.
+        let (from, inclusive) = match self.cursor {
+            Some((row, top)) if top == vp.top && !new_search => (row, false),
+            _ => (vp.top, forward),
+        };
+        match search::find(&self.view.matches.starts, from, forward, inclusive) {
+            Some(row) => {
+                vp.top = row.min(vp.max_top());
+                self.cursor = Some((row, vp.top));
+            }
+            None => self.message = Some("Pattern not found".into()),
+        }
+    }
+
+    /// "name (file 2 of 3), line 12 of 300", for `=` and `:f`.
+    fn position(&self) -> String {
+        let line = self.view.anchor() + 1;
+        let total = self.doc.files[self.file].raw.len();
+        let name = &self.doc.files[self.file].name;
+        let files = self.doc.files.len();
+        if files > 1 {
+            format!(
+                "{name} (file {} of {files}), line {line} of {total}",
+                self.file + 1
+            )
+        } else {
+            format!("{name}, line {line} of {total}")
+        }
+    }
+
+    fn status(&self) -> String {
+        if let Some(help) = &self.help {
+            let at = if help.vp.at_end() {
+                "(END)"
+            } else {
+                "--More--"
+            };
+            return format!("Help {at}  q to close");
+        }
+        let vp = &self.view.vp;
+        let mut status = if vp.at_end() {
+            "(END)".to_string()
+        } else {
+            format!("--More--({}%)", vp.percent())
+        };
+        let files = self.doc.files.len();
+        if files > 1 {
+            let name = &self.doc.files[self.file].name;
+            status.push_str(&format!("  [{}/{files}] {name}", self.file + 1));
+            if vp.at_end() && self.file + 1 < files {
+                let next = &self.doc.files[self.file + 1].name;
+                status.push_str(&format!("  Next file: {next} (Space or :n)"));
+            }
+        }
+        if self.raw {
+            status.push_str("  [source]");
+        }
+        status
+    }
+
+    fn draw(&self, out: &mut impl Write) -> io::Result<()> {
+        let view = self.help.as_ref().unwrap_or(&self.view);
+        let links = self
+            .opts
+            .hyperlinks
+            .then_some(view.wrapped.links.as_slice());
+        // Search highlighting needs reverse video even without colors.
+        let mode = self.opts.color.max(ColorMode::Mono);
+        let rows = &view.wrapped.rows;
+        for i in 0..view.vp.height {
+            // Clear before printing: clearing after a full-width row would erase its last cell.
+            queue!(out, MoveTo(0, i as u16), Clear(ClearType::CurrentLine))?;
+            let r = view.vp.top + i;
+            let Some(row) = rows.get(r) else { continue };
+            let mut line = Line::default();
+            if view.gutter > 0 {
+                let source = view.wrapped.source[r];
+                let first = r == 0 || view.wrapped.source[r - 1] != source;
+                line.spans
+                    .push(gutter_span(first.then_some(source + 1), view.gutter));
+            }
+            let ranges = view.matches.ranges.get(r).map_or(&[][..], Vec::as_slice);
+            line.append(search::highlight(row, ranges));
+            queue!(out, Print(ansi::render(&line, mode, links)))?;
+        }
+
+        // Stay short of the last column so the terminal never scrolls.
+        let max = (self.cols as usize).saturating_sub(1);
+        let bottom = view.vp.height as u16;
+        queue!(out, MoveTo(0, bottom), Clear(ClearType::CurrentLine))?;
+        if let Some((kind, input)) = &self.prompt {
+            let prefix = match kind {
+                PromptKind::Search { backward: false } => "/",
+                PromptKind::Search { backward: true } => "?",
+                PromptKind::Command => ":",
+            };
+            let text = format!("{prefix}{input}");
+            // Keep the end of long input visible.
+            let shown = tail(&text, max);
+            queue!(
+                out,
+                Print(shown),
+                cursor::MoveTo(shown.width() as u16, bottom),
+                cursor::Show
+            )?;
+        } else {
+            let status = self.message.clone().unwrap_or_else(|| self.status());
+            queue!(
+                out,
+                cursor::Hide,
+                SetAttribute(Attribute::Reverse),
+                Print(head(&status, max)),
+                SetAttribute(Attribute::Reset),
+            )?;
+        }
+        out.flush()
     }
 }
 
-fn truncate(s: &str, max_width: usize) -> &str {
-    if s.width() <= max_width {
-        return s;
+fn empty_view() -> View {
+    View {
+        rendered: Rendered::default(),
+        wrapped: Wrapped::default(),
+        vp: Viewport::new(0, 1),
+        gutter: 0,
+        matches: RowMatches::default(),
     }
+}
+
+/// The longest prefix of `s` that fits in `max` columns.
+fn head(s: &str, max: usize) -> &str {
     let mut width = 0;
     for (i, ch) in s.char_indices() {
-        width += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width > max_width {
+        width += ch.width().unwrap_or(0);
+        if width > max {
             return &s[..i];
+        }
+    }
+    s
+}
+
+/// The longest suffix of `s` that fits in `max` columns.
+fn tail(s: &str, max: usize) -> &str {
+    let mut width = 0;
+    for (i, ch) in s.char_indices().rev() {
+        width += ch.width().unwrap_or(0);
+        if width > max {
+            return &s[i + ch.len_utf8()..];
         }
     }
     s
@@ -126,49 +492,290 @@ fn truncate(s: &str, max_width: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::Rendered;
-    use crate::style::Line;
+    use crate::assets;
+    use crate::document::{File, Section};
+    use crate::render::plain;
 
-    fn lines(n: usize) -> Rendered {
-        let mut r = Rendered::default();
-        for i in 1..=n {
-            r.push(Line::plain(format!("line {i}")), i);
+    fn numbered(n: usize) -> String {
+        (1..=n).map(|i| format!("line {i}\n")).collect()
+    }
+
+    fn doc(files: &[(&str, &str)]) -> Document {
+        Document {
+            files: files
+                .iter()
+                .map(|(name, text)| File {
+                    name: name.to_string(),
+                    content: if name.ends_with(".md") {
+                        Section::Markdown(text.to_string())
+                    } else {
+                        Section::Plain
+                    },
+                    raw: plain::render(text),
+                })
+                .collect(),
+            width: None,
+            max_width: 100,
+            highlight: false,
+            theme: assets::theme(assets::DEFAULT_DARK_THEME).unwrap(),
+            ascii: false,
+            front_matter: true,
+            line_numbers: false,
         }
-        r
     }
 
-    #[test]
-    fn status_shows_progress_then_end() {
-        let mut vp = Viewport::new(40, 10);
-        assert_eq!(status_text(&vp), "--More--(25%)");
-        vp.apply(Action::Bottom);
-        assert_eq!(status_text(&vp), "(END)");
+    const OPTS: Options = Options {
+        exit_at_eof: false,
+        color: ColorMode::None,
+        hyperlinks: false,
+    };
+
+    fn press(p: &mut Pager, keys: &str) -> Flow {
+        let mut flow = Flow::Continue;
+        for c in keys.chars() {
+            let code = match c {
+                '\n' => KeyCode::Enter,
+                '\x1b' => KeyCode::Esc,
+                '\x08' => KeyCode::Backspace,
+                c => KeyCode::Char(c),
+            };
+            flow = p.key(KeyEvent::new(code, KeyModifiers::NONE));
+        }
+        flow
     }
 
-    #[test]
-    fn truncate_respects_width() {
-        assert_eq!(truncate("--More--(25%)", 8), "--More--");
-        assert_eq!(truncate("日本語", 5), "日本");
-        assert_eq!(truncate("ok", 10), "ok");
-    }
-
-    #[test]
-    fn draw_shows_visible_rows_and_status() {
-        let wrapped = wrap_all(&lines(30), 80);
-        let mut vp = Viewport::new(wrapped.rows.len(), 10);
-        vp.apply(Action::PageDown);
+    fn screen(p: &Pager) -> String {
         let mut buf = Vec::new();
+        p.draw(&mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    /// The screen with SGR styling removed (cursor movement stays).
+    fn plain_screen(p: &Pager) -> String {
+        let raw = screen(p);
+        let mut out = String::new();
+        let mut rest = raw.as_str();
+        while let Some(i) = rest.find("\x1b[") {
+            out.push_str(&rest[..i]);
+            let after = &rest[i + 2..];
+            match after.find(|c: char| c.is_ascii_alphabetic()) {
+                Some(end) if after.as_bytes()[end] == b'm' => rest = &after[end + 1..],
+                Some(end) => {
+                    out.push_str(&rest[i..i + 2 + end + 1]);
+                    rest = &after[end + 1..];
+                }
+                None => break,
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    fn top_text(p: &Pager) -> String {
+        p.view.wrapped.rows[p.view.vp.top].text()
+    }
+
+    #[test]
+    fn search_jumps_and_highlights() {
+        let d = doc(&[("a.txt", &numbered(100))]);
+        let mut p = Pager::new(&d, &OPTS, 80, 10);
+        press(&mut p, "/line 5\n");
+        assert_eq!(top_text(&p), "line 5");
+        // Matches are shown in reverse video.
+        assert!(screen(&p).contains("\x1b[7mline 5\x1b[0m"));
+        press(&mut p, "n");
+        assert_eq!(top_text(&p), "line 50");
+        press(&mut p, "n");
+        assert_eq!(top_text(&p), "line 51");
+        press(&mut p, "N");
+        assert_eq!(top_text(&p), "line 50");
+    }
+
+    #[test]
+    fn search_regex_smart_case_and_not_found() {
+        let d = doc(&[("a.txt", "alpha\nBeta\nbeta\n")]);
+        let mut p = Pager::new(&d, &OPTS, 80, 2);
+        press(&mut p, "/Beta\n");
+        assert_eq!(top_text(&p), "Beta");
+        press(&mut p, "n");
+        assert_eq!(p.message.as_deref(), Some("Pattern not found"));
+        press(&mut p, "g/b.ta\n");
+        assert_eq!(top_text(&p), "Beta");
+        press(&mut p, "/(\n");
+        assert!(p.message.as_deref().unwrap().starts_with("Invalid pattern"));
+    }
+
+    #[test]
+    fn backward_search_and_repeat_with_empty_pattern() {
+        let d = doc(&[("a.txt", &numbered(30))]);
+        let mut p = Pager::new(&d, &OPTS, 80, 5);
+        press(&mut p, "G");
+        assert_eq!(top_text(&p), "line 27");
+        press(&mut p, "?line 1\n");
+        assert_eq!(top_text(&p), "line 19");
+        // `n` continues backward for a `?` search; `N` goes forward.
+        press(&mut p, "n");
+        assert_eq!(top_text(&p), "line 18");
+        press(&mut p, "N");
+        assert_eq!(top_text(&p), "line 19");
+        // An empty pattern repeats the last one.
+        press(&mut p, "g/\n");
+        assert_eq!(top_text(&p), "line 1");
+    }
+
+    #[test]
+    fn matches_at_the_end_still_advance() {
+        // The last screen cannot scroll further, but n must still move on.
+        let d = doc(&[("a.txt", "x\nx\nx\nhit a\nhit b\nhit c\n")]);
+        let mut p = Pager::new(&d, &OPTS, 80, 5);
+        press(&mut p, "/hit\n");
+        let first = p.cursor;
+        press(&mut p, "n");
+        assert_ne!(p.cursor, first);
+        press(&mut p, "n");
+        assert_eq!(p.cursor.map(|c| c.0), Some(5));
+        press(&mut p, "n");
+        assert_eq!(p.message.as_deref(), Some("Pattern not found"));
+    }
+
+    #[test]
+    fn prompt_editing() {
+        let d = doc(&[("a.txt", &numbered(20))]);
+        let mut p = Pager::new(&d, &OPTS, 80, 5);
+        press(&mut p, "/line 9x\x08");
+        assert!(screen(&p).contains("/line 9"));
+        press(&mut p, "\n");
+        assert_eq!(top_text(&p), "line 9");
+        // Escape cancels, Backspace on an empty prompt cancels.
+        press(&mut p, "/abc\x1b");
+        assert!(p.prompt.is_none());
+        press(&mut p, "/\x08");
+        assert!(p.prompt.is_none());
+    }
+
+    #[test]
+    fn switching_files_keeps_positions() {
+        let d = doc(&[("a.txt", &numbered(50)), ("b.txt", &numbered(50))]);
+        let mut p = Pager::new(&d, &OPTS, 80, 10);
+        press(&mut p, " ");
+        assert_eq!(top_text(&p), "line 10");
+        assert!(screen(&p).contains("[1/2] a.txt"));
+        press(&mut p, ":n");
+        assert_eq!(p.file, 1);
+        assert_eq!(top_text(&p), "line 1");
+        press(&mut p, ":n");
+        assert_eq!(p.message.as_deref(), Some("No next file"));
+        press(&mut p, ":p");
+        assert_eq!(top_text(&p), "line 10");
+    }
+
+    #[test]
+    fn space_at_end_goes_to_next_file() {
+        let d = doc(&[("a.txt", &numbered(12)), ("b.txt", "other\n")]);
+        let mut p = Pager::new(&d, &OPTS, 80, 10);
+        press(&mut p, "G");
+        assert!(screen(&p).contains("Next file: b.txt"));
+        // A line step at the end does not switch files; a page step does.
+        press(&mut p, "j");
+        assert_eq!(p.file, 0);
+        press(&mut p, " ");
+        assert_eq!(p.file, 1);
+        assert_eq!(top_text(&p), "other");
+    }
+
+    #[test]
+    fn exit_at_eof_quits_after_last_file() {
         let opts = Options {
-            exit_at_eof: false,
-            color: ColorMode::None,
-            hyperlinks: false,
+            exit_at_eof: true,
+            ..OPTS
         };
-        draw(&mut buf, &wrapped, &vp, 80, &opts).unwrap();
-        let screen = String::from_utf8(buf).unwrap();
-        assert!(screen.contains("line 11"));
-        assert!(screen.contains("line 20"));
-        assert!(!screen.contains("line 10\u{1b}"));
-        assert!(!screen.contains("line 21"));
-        assert!(screen.contains("--More--(66%)"));
+        let d = doc(&[("a.txt", &numbered(12))]);
+        let mut p = Pager::new(&d, &opts, 80, 10);
+        assert_eq!(press(&mut p, " "), Flow::Continue);
+        assert_eq!(press(&mut p, " "), Flow::Quit);
+    }
+
+    #[test]
+    fn colon_commands() {
+        let d = doc(&[("a.txt", &numbered(5))]);
+        let mut p = Pager::new(&d, &OPTS, 80, 10);
+        press(&mut p, ":f");
+        assert_eq!(p.message.as_deref(), Some("a.txt, line 1 of 5"));
+        press(&mut p, ":x");
+        assert!(p.message.as_deref().unwrap().starts_with("Unknown command"));
+        assert_eq!(press(&mut p, ":q"), Flow::Quit);
+    }
+
+    #[test]
+    fn position_message() {
+        let d = doc(&[("a.txt", &numbered(40)), ("b.txt", "x\n")]);
+        let mut p = Pager::new(&d, &OPTS, 80, 10);
+        press(&mut p, "d=");
+        assert_eq!(
+            p.message.as_deref(),
+            Some("a.txt (file 1 of 2), line 5 of 40")
+        );
+        // Messages last until the next key.
+        press(&mut p, "j");
+        assert!(p.message.is_none());
+    }
+
+    #[test]
+    fn raw_toggle_keeps_place() {
+        let md = format!("# Title\n\n{}", "para\n\n".repeat(30));
+        let d = doc(&[("a.md", &md)]);
+        let mut p = Pager::new(&d, &OPTS, 40, 10);
+        assert_eq!(top_text(&p), "Title");
+        press(&mut p, "m");
+        assert_eq!(top_text(&p), "# Title");
+        // The confirmation message shows first; the status line marks the mode.
+        assert!(screen(&p).contains("Showing raw source"));
+        assert!(p.status().contains("[source]"));
+        press(&mut p, "dm");
+        assert_eq!(p.view.anchor(), 4);
+        assert!(!p.status().contains("[source]"));
+    }
+
+    #[test]
+    fn help_overlay() {
+        let d = doc(&[("a.txt", &numbered(50))]);
+        let mut p = Pager::new(&d, &OPTS, 80, 10);
+        press(&mut p, " h");
+        assert!(screen(&p).contains("mmore keys"));
+        // Keys move the help, not the file; q closes help instead of quitting.
+        assert_eq!(press(&mut p, "jq"), Flow::Continue);
+        assert!(p.help.is_none());
+        assert_eq!(top_text(&p), "line 10");
+    }
+
+    #[test]
+    fn line_number_gutter() {
+        let mut d = doc(&[("a.txt", "short\nthis line is long enough to wrap\n")]);
+        d.line_numbers = true;
+        let p = Pager::new(&d, &OPTS, 20, 10);
+        let rows: Vec<String> = p.view.wrapped.rows.iter().map(Line::text).collect();
+        // Content wraps at the width minus the 4-column gutter.
+        assert_eq!(rows[1], "this line is lon");
+        let s = plain_screen(&p);
+        assert!(s.contains("  1 short"));
+        assert!(s.contains("  2 this line is lon"));
+        assert!(s.contains("    g enough to wrap"));
+    }
+
+    #[test]
+    fn resize_keeps_search_highlights() {
+        let d = doc(&[("a.txt", &numbered(40))]);
+        let mut p = Pager::new(&d, &OPTS, 80, 10);
+        press(&mut p, "/line 30\n");
+        p.resize(40, 20);
+        assert!(screen(&p).contains("\x1b[7mline 30\x1b[0m"));
+    }
+
+    #[test]
+    fn status_line_fits_and_prompt_shows_tail() {
+        assert_eq!(head("--More--(25%)", 8), "--More--");
+        assert_eq!(head("日本語", 5), "日本");
+        assert_eq!(tail("/abcdef", 3), "def");
+        assert_eq!(tail("ok", 10), "ok");
     }
 }

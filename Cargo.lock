@@ -504,6 +504,7 @@ dependencies = [
  "insta",
  "predicates",
  "pulldown-cmark",
+ "regex",
  "syntect",
  "unicode-width",
 ]

@@ -19,6 +19,7 @@ pub struct Style {
     pub italic: bool,
     pub underline: bool,
     pub strike: bool,
+    pub reverse: bool,
     /// Hyperlink target: an index into the document's link table.
     pub link: Option<u32>,
 }
@@ -116,6 +117,7 @@ pub fn markup(line: &Line) -> String {
             (s.italic, "i"),
             (s.underline, "u"),
             (s.strike, "s"),
+            (s.reverse, "rev"),
         ] {
             if on {
                 tags.push(tag.to_string());

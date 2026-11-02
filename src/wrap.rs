@@ -14,6 +14,10 @@ pub struct Wrapped {
     pub source: Vec<usize>,
     /// Hyperlink targets, indexed by `Style::link`.
     pub links: Vec<String>,
+    /// `line[i]` is the rendered line that `rows[i]` is part of.
+    pub line: Vec<usize>,
+    /// `offset[i]` is the character offset of `rows[i]` within its rendered line.
+    pub offset: Vec<usize>,
 }
 
 impl Wrapped {
@@ -28,10 +32,19 @@ pub fn wrap_all(rendered: &Rendered, width: usize) -> Wrapped {
         links: rendered.links.clone(),
         ..Wrapped::default()
     };
-    for (line, &source) in rendered.lines.iter().zip(&rendered.source) {
+    for (index, (line, &source)) in rendered.lines.iter().zip(&rendered.source).enumerate() {
+        let mut offset = 0;
         for row in wrap_line(line, width) {
+            let chars = row
+                .spans
+                .iter()
+                .map(|s| s.text.chars().count())
+                .sum::<usize>();
             wrapped.rows.push(row);
             wrapped.source.push(source);
+            wrapped.line.push(index);
+            wrapped.offset.push(offset);
+            offset += chars;
         }
     }
     wrapped
@@ -227,6 +240,8 @@ mod tests {
         let w = wrap_all(&r, 2);
         assert_eq!(texts(&w.rows), vec!["ab", "cd", "x", "12", "34", "56"]);
         assert_eq!(w.source, vec![0, 0, 3, 4, 4, 4]);
+        assert_eq!(w.line, vec![0, 0, 1, 2, 2, 2]);
+        assert_eq!(w.offset, vec![0, 2, 0, 0, 2, 4]);
         assert_eq!(w.first_row_of(3), 2);
         // A source line with no rows of its own anchors to the next one.
         assert_eq!(w.first_row_of(1), 2);
