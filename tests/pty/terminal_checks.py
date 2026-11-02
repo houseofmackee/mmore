@@ -93,7 +93,9 @@ def run(cmd, keys, rows=10, cols=80, resize=None, env=None):
     After each key, output is read until it has been quiet for a moment. A
     snapshot of everything read so far is taken at the start and after each key.
     "WAIT" pauses (for background work), "PAUSE" waits briefly, "RESIZE"
-    applies `resize` (rows, cols), and a function is called (to change a file).
+    applies `resize` (rows, cols), ("UNTIL", text) reads until `text` appears
+    (at most 10 s; for complete frames on slow machines), and a function is
+    called (to change a file).
     """
     pid, fd = spawn(cmd, clean_env(env), rows, cols)
     out = b""
@@ -119,7 +121,12 @@ def run(cmd, keys, rows=10, cols=80, resize=None, env=None):
     drain(3.0)
     snapshots = [out]
     for k in keys:
-        if callable(k):
+        if isinstance(k, tuple) and k[0] == "UNTIL":
+            since = len(out)
+            deadline = time.time() + 10
+            while k[1].encode() not in out[since:] and time.time() < deadline:
+                drain(first=0.5, quiet=0.1)
+        elif callable(k):
             k()
             drain()
         elif k == "WAIT":
@@ -302,8 +309,9 @@ def pager_basics(tmp):
     check("--always-page pages short input", ALT_ON in out and "(END)" in out)
     out, code, _ = run(f"seq 1 25 | {BIN} -e", [" ", " ", " ", "q"])
     check("-e exits after paging past end", code == 0 and ALT_OFF in out)
-    out, code, snaps = run(f"seq 1 100 | {BIN}", ["RESIZE", "q"], resize=(20, 80))
-    check("resize redraws with taller viewport (19%)", "--More--(19%)" in after(snaps, 0))
+    # Wait for each complete frame (its status line), so slow machines pass too.
+    out, code, snaps = run(f"seq 1 100 | {BIN}", [("UNTIL", "--More--"), "RESIZE", ("UNTIL", "--More--(19%)"), "q"], resize=(20, 80))
+    check("resize redraws with taller viewport (19%)", "--More--(19%)" in snaps[3][len(snaps[1]):].decode(errors="replace"))
     out, code, _ = run(f"seq 1 100 | {BIN}", ["\x03"])
     check("ctrl-c quits cleanly", code == 0 and ALT_OFF in out)
     # Keys pressed right away (while mmore asks the terminal about its
@@ -329,8 +337,8 @@ def colors():
 def markdown():
     out, code, _ = run(f"{BIN} {MD}", ["q"], rows=20, cols=80)
     check("markdown is rendered in the pager", "═" * 80 in out and "# mmore" not in out and code == 0)
-    out, code, snaps = run(f"{BIN} {MD}", ["RESIZE", "q"], rows=20, cols=80, resize=(20, 40))
-    resized = after(snaps, 0)
+    out, code, snaps = run(f"{BIN} {MD}", [("UNTIL", "--More--"), "RESIZE", ("UNTIL", "--More--"), "q"], rows=20, cols=80, resize=(20, 40))
+    resized = snaps[3][len(snaps[1]):].decode(errors="replace")
     check("resize re-renders markdown at new width", "═" * 40 in resized and "═" * 41 not in resized)
     out, code, _ = run(f"{BIN} {SHORT_MD}", [], rows=20, cols=40)
     check("short markdown is rendered without pager", ALT_ON not in out and "═" * 40 in out and "# Title" not in out)
