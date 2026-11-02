@@ -6,6 +6,7 @@
 //! so terminals that ignore OSC 11 cost one round trip instead of a full timeout.
 
 use std::env;
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// How long to wait for the terminal to answer.
@@ -20,7 +21,60 @@ pub fn is_light() -> Option<bool> {
         return None;
     }
     let reply = query::background(QUERY_TIMEOUT)?;
-    parse_osc11(&reply).map(|(r, g, b)| luminance(r, g, b) > 0.5)
+    let (answers, typed) = split_reply(&reply);
+    TYPEAHEAD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .extend_from_slice(&typed);
+    parse_osc11(&answers).map(|(r, g, b)| luminance(r, g, b) > 0.5)
+}
+
+/// Keys pressed while the terminal was being asked about its background: they
+/// were read along with its answer and must not be lost.
+static TYPEAHEAD: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+/// Take the keys that were typed during the background query (see `TYPEAHEAD`).
+pub fn take_typeahead() -> Vec<u8> {
+    std::mem::take(
+        &mut *TYPEAHEAD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
+/// Separate the terminal's answers (the OSC 11 reply and the DA1 reply) from
+/// anything else that was read: keys the user pressed meanwhile.
+pub fn split_reply(reply: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut answers = Vec::new();
+    let mut typed = Vec::new();
+    let mut i = 0;
+    while i < reply.len() {
+        let rest = &reply[i..];
+        let end = if rest.starts_with(b"\x1b]11;") {
+            // Ends with BEL or ST (ESC \).
+            rest.iter()
+                .position(|&b| b == 0x07)
+                .map(|p| p + 1)
+                .into_iter()
+                .chain(rest.windows(2).position(|w| w == b"\x1b\\").map(|p| p + 2))
+                .min()
+        } else if rest.starts_with(b"\x1b[?") {
+            rest.iter().position(|&b| b == b'c').map(|p| p + 1)
+        } else {
+            None
+        };
+        match end {
+            Some(end) => {
+                answers.extend_from_slice(&rest[..end]);
+                i += end;
+            }
+            None => {
+                typed.push(reply[i]);
+                i += 1;
+            }
+        }
+    }
+    (answers, typed)
 }
 
 /// `COLORFGBG` is "fg;bg" or "fg;default;bg" with palette indexes. Background 7
@@ -187,6 +241,31 @@ mod tests {
         assert_eq!(parse_osc11(b"\x1b[?1;2c"), None);
         assert_eq!(parse_osc11(b"\x1b]11;rgb:zz/00/00\x07"), None);
         assert_eq!(parse_osc11(b"\x1b]11;rgb:12345/0/0\x07"), None);
+    }
+
+    #[test]
+    fn keys_typed_during_the_query_are_kept() {
+        let reply = b" \x1b]11;rgb:ffff/ffff/ffff\x1b\\j\x1b[?62;22cq";
+        let (answers, typed) = split_reply(reply);
+        assert_eq!(typed, b" jq");
+        assert_eq!(parse_osc11(&answers), Some((1.0, 1.0, 1.0)));
+        assert!(query_has_da1(&answers));
+        // BEL-terminated reply, and an arrow key typed before it.
+        let (answers, typed) = split_reply(b"\x1b[A\x1b]11;rgb:0/0/0\x07\x1b[?1c");
+        assert_eq!(typed, b"\x1b[A");
+        assert!(parse_osc11(&answers).is_some());
+        // Nothing but keys (the terminal did not answer at all).
+        assert_eq!(split_reply(b"\r").1, b"\r");
+    }
+
+    #[cfg(unix)]
+    fn query_has_da1(bytes: &[u8]) -> bool {
+        query::has_da1_reply(bytes)
+    }
+
+    #[cfg(not(unix))]
+    fn query_has_da1(_bytes: &[u8]) -> bool {
+        true
     }
 
     #[test]

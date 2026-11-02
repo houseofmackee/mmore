@@ -77,6 +77,60 @@ pub fn map(key: KeyEvent) -> Action {
     }
 }
 
+/// Key presses from raw terminal input that was read before the pager started
+/// (see `background::take_typeahead`). Covers what people type quickly: text,
+/// Enter, Backspace, Ctrl-letters, arrows, Home/End, and Page Up/Down.
+pub fn from_bytes(bytes: &[u8]) -> Vec<KeyEvent> {
+    let text = String::from_utf8_lossy(bytes);
+    let chars: Vec<char> = text.chars().collect();
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let mut keys = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        i += 1;
+        let event = match c {
+            '\r' | '\n' => key(KeyCode::Enter),
+            '\x7f' | '\x08' => key(KeyCode::Backspace),
+            '\x1b' if chars.get(i) == Some(&'[') || chars.get(i) == Some(&'O') => {
+                // CSI or SS3: ESC [ A, ESC O A, ESC [ 5 ~, ...
+                let start = i + 1;
+                let mut end = start;
+                while chars
+                    .get(end)
+                    .is_some_and(|c| c.is_ascii_digit() || *c == ';')
+                {
+                    end += 1;
+                }
+                let Some(&last) = chars.get(end) else { break };
+                let params: String = chars[start..end].iter().collect();
+                i = end + 1;
+                let code = match (last, params.as_str()) {
+                    ('A', _) => KeyCode::Up,
+                    ('B', _) => KeyCode::Down,
+                    ('C', _) => KeyCode::Right,
+                    ('D', _) => KeyCode::Left,
+                    ('H', _) | ('~', "1" | "7") => KeyCode::Home,
+                    ('F', _) | ('~', "4" | "8") => KeyCode::End,
+                    ('~', "5") => KeyCode::PageUp,
+                    ('~', "6") => KeyCode::PageDown,
+                    _ => continue,
+                };
+                key(code)
+            }
+            '\x1b' => key(KeyCode::Esc),
+            c @ '\x01'..='\x1a' => KeyEvent::new(
+                KeyCode::Char((b'a' + (c as u8 - 1)) as char),
+                KeyModifiers::CONTROL,
+            ),
+            c if c.is_control() => continue,
+            c => key(KeyCode::Char(c)),
+        };
+        keys.push(event);
+    }
+    keys
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +172,31 @@ mod tests {
         assert_eq!(map(ctrl('n')), Action::LineDown);
         assert_eq!(map(key(KeyCode::Char('F'))), Action::Follow);
         assert_eq!(map(ctrl('z')), Action::Suspend);
+    }
+
+    #[test]
+    fn typed_bytes_become_keys() {
+        let keys = from_bytes(b" q\r\x7f\x03\x1b[B\x1bOA\x1b[6~\x1b[H\x1b\x1b[Zx");
+        let codes: Vec<KeyCode> = keys.iter().map(|k| k.code).collect();
+        assert_eq!(
+            codes,
+            vec![
+                KeyCode::Char(' '),
+                KeyCode::Char('q'),
+                KeyCode::Enter,
+                KeyCode::Backspace,
+                KeyCode::Char('c'),
+                KeyCode::Down,
+                KeyCode::Up,
+                KeyCode::PageDown,
+                KeyCode::Home,
+                KeyCode::Esc,
+                // ESC [ Z (Shift-Tab) is not a key mmore uses: skipped.
+                KeyCode::Char('x'),
+            ]
+        );
+        assert_eq!(map(keys[4]), Action::Quit);
+        assert_eq!(map(keys[2]), Action::LineDown);
     }
 
     #[test]

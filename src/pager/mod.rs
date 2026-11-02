@@ -54,6 +54,14 @@ pub fn run(document: &Document, opts: &Options) -> io::Result<()> {
     let (cols, rows) = terminal::size()?;
     let mut pager = Pager::new(document, opts, cols, rows);
     pager.wait_for_first_screen(FIRST_SCREEN_WAIT);
+    // Keys pressed while the terminal was asked about its background come first.
+    for key in keys::from_bytes(&crate::background::take_typeahead()) {
+        match pager.key(key) {
+            Flow::Quit => return Ok(()),
+            // Suspending before the first screen would be odd; ignore it here.
+            Flow::Suspend | Flow::Continue => {}
+        }
+    }
     let mut dirty = true;
     // Highlighted lines available at the last draw.
     let mut drawn = 0;

@@ -180,6 +180,31 @@ def exits_after(cmd, keys, rows=10, cols=80, env=None):
     return bool(done)
 
 
+def early_key(cmd, key, delay, rows=10, cols=80):
+    """Send `key` `delay` seconds after starting, before the first screen is up,
+    then quit. Returns all output."""
+    pid, fd = spawn(cmd, clean_env(), rows, cols)
+    out = b""
+    start = time.time()
+    sent = False
+    while time.time() - start < 2.0:
+        if not sent and time.time() - start >= delay:
+            os.write(fd, key)
+            sent = True
+        r, _, _ = select.select([fd], [], [], 0.01)
+        if r:
+            try:
+                out += os.read(fd, 65536)
+            except OSError:
+                break
+    try:
+        os.write(fd, b"q")
+    except OSError:
+        pass
+    _, out = finish(pid, fd, out)
+    return out.decode(errors="replace")
+
+
 def answering_terminal(reply, env=None):
     """Run mmore on a terminal that answers the OSC 11 query with `reply`.
 
@@ -245,6 +270,10 @@ def pager_basics(tmp):
     check("resize redraws with taller viewport (19%)", "--More--(19%)" in after(snaps, 0))
     out, code, _ = run(f"seq 1 100 | {BIN}", ["\x03"])
     check("ctrl-c quits cleanly", code == 0 and ALT_OFF in out)
+    # Keys pressed right away (while mmore asks the terminal about its
+    # background) must not be lost.
+    check("Enter pressed at startup is not lost", "--More--(10%)" in early_key(f"seq 1 100 | {BIN}", b"\r", 0.01))
+    check("Space pressed at startup is not lost", "--More--(18%)" in early_key(f"seq 1 100 | {BIN}", b" ", 0.0))
     check("-e exits after 3 spaces on 25 lines", exits_after(f"seq 1 25 | {BIN} -e", [" ", " ", " "]))
     check("without -e stays open at end", not exits_after(f"seq 1 25 | {BIN}", [" ", " ", " "]))
     return n100
