@@ -30,7 +30,7 @@ syntax-highlights source code for common languages.
 | CLI parsing          | `clap` (derive)                         | Help, version, and shell completions                        |
 | Markdown parsing     | `pulldown-cmark`                        | Event stream; enable tables, strikethrough, task lists, footnotes |
 | Syntax highlighting  | `syntect` (`default-fancy` feature)     | Pure-Rust regex backend, bundled Sublime syntaxes and themes |
-| Terminal control     | `crossterm`                             | Raw mode, alternate screen, key and resize events          |
+| Terminal control     | `crossterm` (`use-dev-tty` feature)     | Raw mode, alternate screen, key and resize events. The feature is required on macOS: the default kqueue reader cannot poll `/dev/tty` when stdin is a pipe |
 | Text width/wrapping  | `unicode-width`, `unicode-segmentation` | Correct width for CJK and emoji when wrapping               |
 | Terminal detection   | `std::io::IsTerminal`                   | Decide between pager mode and passthrough                  |
 | Errors               | `anyhow`                                | Simple error propagation in the binary                     |

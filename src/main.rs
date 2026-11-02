@@ -1,6 +1,8 @@
 mod cli;
+mod pager;
 mod render;
 mod source;
+mod wrap;
 
 use std::io::{self, BufWriter, IsTerminal, Write};
 use std::process::ExitCode;
@@ -24,9 +26,11 @@ fn main() -> ExitCode {
         cli.files.iter().map(|p| Origin::from_arg(p)).collect()
     };
 
-    match run(&cli, &origins) {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::FAILURE,
+    let (lines, all_ok) = collect(&cli, &origins);
+
+    match output(&cli, &lines) {
+        Ok(()) if all_ok => ExitCode::SUCCESS,
+        Ok(()) => ExitCode::FAILURE,
         // The reader went away (for example `mmore file | head`); that is not an error.
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(e) => {
@@ -36,48 +40,69 @@ fn main() -> ExitCode {
     }
 }
 
-/// Writes every input to stdout. Returns `Ok(false)` if any input could not be shown.
-fn run(cli: &Cli, origins: &[Origin]) -> io::Result<bool> {
-    let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+/// Load and render every input into one list of lines. Errors are reported on
+/// stderr as they happen; the flag is false if any input could not be shown.
+fn collect(cli: &Cli, origins: &[Origin]) -> (Vec<String>, bool) {
     let multiple = origins.len() > 1;
+    let mut lines = Vec::new();
     let mut all_ok = true;
 
     for origin in origins {
         let source = match Source::load(origin.clone()) {
             Ok(s) => s,
             Err(e) => {
-                out.flush()?;
                 eprintln!("mmore: {e:#}");
                 all_ok = false;
                 continue;
             }
         };
+        let name = source.origin.display_name();
 
         if multiple {
-            write_file_header(&mut out, &source.origin.display_name())?;
+            // Separator between files, in the same style as `more`.
+            let bar = ":".repeat(14);
+            lines.extend([bar.clone(), name.clone(), bar]);
         }
 
         if source.is_binary() && !cli.force {
-            writeln!(
-                out,
-                "\n******** {}: Not a text file ********\n",
-                source.origin.display_name()
-            )?;
+            lines.extend([
+                String::new(),
+                format!("******** {name}: Not a text file ********"),
+                String::new(),
+            ]);
             continue;
         }
 
-        for line in render::plain::render(&source.text()) {
-            writeln!(out, "{line}")?;
-        }
+        lines.extend(render::plain::render(&source.text()));
     }
 
-    out.flush()?;
-    Ok(all_ok)
+    (lines, all_ok)
 }
 
-/// Separator between files, in the same style as `more`.
-fn write_file_header(out: &mut impl Write, name: &str) -> io::Result<()> {
-    let bar = ":".repeat(14);
-    writeln!(out, "{bar}\n{name}\n{bar}")
+/// Page the lines on a terminal, or print them when paging is off or pointless.
+fn output(cli: &Cli, lines: &[String]) -> io::Result<()> {
+    if cli.no_pager || !io::stdout().is_terminal() {
+        return dump(lines);
+    }
+    let Ok((cols, rows)) = crossterm::terminal::size() else {
+        return dump(lines);
+    };
+    // Leave a row free so the shell prompt does not push the first line off screen.
+    if !cli.always_page && wrap::row_count(lines, cols as usize) < rows as usize {
+        return dump(lines);
+    }
+    pager::run(
+        lines,
+        &pager::Options {
+            exit_at_eof: cli.exit_at_eof,
+        },
+    )
+}
+
+fn dump(lines: &[String]) -> io::Result<()> {
+    let mut out = BufWriter::new(io::stdout().lock());
+    for line in lines {
+        writeln!(out, "{line}")?;
+    }
+    out.flush()
 }

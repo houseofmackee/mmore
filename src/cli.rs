@@ -13,4 +13,16 @@ pub struct Cli {
     /// Display binary files anyway.
     #[arg(long)]
     pub force: bool,
+
+    /// Exit when paging forward past the end, like classic `more`.
+    #[arg(short = 'e', long)]
+    pub exit_at_eof: bool,
+
+    /// Print to stdout without paging.
+    #[arg(long, conflicts_with = "always_page")]
+    pub no_pager: bool,
+
+    /// Page even if the content fits on one screen.
+    #[arg(long)]
+    pub always_page: bool,
 }
