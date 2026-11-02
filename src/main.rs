@@ -25,7 +25,7 @@ use source::{Origin, Source};
 use style::Line;
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(cli::args());
 
     if cli.list_themes {
         return finish(list_themes());

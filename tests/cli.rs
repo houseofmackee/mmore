@@ -2,7 +2,10 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn mmore() -> Command {
-    Command::cargo_bin("mmore").unwrap()
+    let mut cmd = Command::cargo_bin("mmore").unwrap();
+    // Keep the user's own defaults out of the tests.
+    cmd.env_remove("MMORE_OPTS");
+    cmd
 }
 
 #[test]
@@ -90,6 +93,7 @@ const ESC: &str = "\x1b[";
 fn mmore_env() -> Command {
     let mut cmd = mmore();
     cmd.env_remove("NO_COLOR")
+        .env_remove("MMORE_OPTS")
         .env_remove("COLORTERM")
         .env_remove("COLORFGBG")
         .env("TERM", "xterm-256color");
@@ -399,4 +403,59 @@ fn line_numbers_with_several_files_skip_headers() {
         .stdout(predicate::str::contains(
             "::::::::::::::\ntests/fixtures/sample.md\n::::::::::::::\n  1 # Title\n",
         ));
+}
+
+#[test]
+fn mmore_opts_sets_defaults() {
+    mmore_env()
+        .env("MMORE_OPTS", "-n")
+        .arg("tests/fixtures/hello.txt")
+        .assert()
+        .success()
+        .stdout("  1 hello\n  2 world\n");
+}
+
+#[test]
+fn command_line_overrides_mmore_opts() {
+    let with = |opts: &str, args: &[&str]| {
+        mmore_env()
+            .env("MMORE_OPTS", opts)
+            .args(args)
+            .output()
+            .unwrap()
+            .stdout
+    };
+    let base = ["--color", "always", "tests/fixtures/hello.rs"];
+    let light = with(
+        "",
+        &["--theme", "InspiredGitHub", base[0], base[1], base[2]],
+    );
+    let dark = with("", &base);
+    // MMORE_OPTS picks the light theme; the command line switches back to dark.
+    assert_eq!(with("--theme InspiredGitHub", &base), light);
+    assert_eq!(
+        with(
+            "--theme InspiredGitHub",
+            &["--theme", "base16-ocean.dark", base[0], base[1], base[2]]
+        ),
+        dark
+    );
+}
+
+#[test]
+fn mmore_opts_with_quotes() {
+    mmore_env()
+        .env("MMORE_OPTS", r#"--theme "Solarized (dark)""#)
+        .args(["--color", "always", "tests/fixtures/hello.rs"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn help_mentions_environment() {
+    mmore()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MMORE_OPTS"));
 }
