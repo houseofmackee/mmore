@@ -2,7 +2,9 @@ name: Release
 
 # Builds and publishes a release when a version tag is pushed:
 #   git tag v0.1.0 && git push origin v0.1.0
-# The tag must match the version in Cargo.toml.
+# The tag must match the version in Cargo.toml. The full CI (lint, tests, and
+# terminal checks on Linux and macOS) runs on the tagged commit first; nothing is
+# built or published unless it passes.
 #
 # Binaries are built for macOS (Apple silicon and Intel) and Linux (x86_64 and
 # ARM, statically linked with musl so they run on any distribution), published
@@ -24,8 +26,27 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  version:
+    name: Check the version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check that the tag matches Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+  ci:
+    name: CI
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: Build (${{ matrix.target }})
+    needs: ci
     strategy:
       fail-fast: true
       matrix:
@@ -41,13 +62,6 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
-      - name: Check that the tag matches Cargo.toml
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
-            exit 1
-          fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
