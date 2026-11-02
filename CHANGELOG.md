@@ -5,6 +5,8 @@ section here, so a version can only be released once it has one.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-02
+
 ### Added
 
 - Compressed files (gzip, bzip2, xz, and zstd) are shown decompressed, and
@@ -82,7 +84,8 @@ First release.
 - Light or dark theme picked from the terminal's background.
 - Builds for macOS and Linux, and a Homebrew formula.
 
-[Unreleased]: https://github.com/houseofmackee/mmore/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/mmore/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/houseofmackee/mmore/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/houseofmackee/mmore/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/houseofmackee/mmore/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/houseofmackee/mmore/releases/tag/v0.1.0

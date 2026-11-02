@@ -21,6 +21,15 @@ With [Homebrew](https://brew.sh), on macOS or Linux:
 brew install houseofmackee/tap/mmore
 ```
 
+To install and upgrade it by its short name (`brew install mmore`), add and trust
+the tap once; Homebrew asks for trust before it installs a tap's formula by its
+short name:
+
+```sh
+brew tap houseofmackee/tap
+brew trust houseofmackee/tap
+```
+
 Or download the archive for your platform from the
 [latest release](https://github.com/houseofmackee/mmore/releases/latest), check it
 against `SHA256SUMS.txt`, and put `mmore` somewhere on your `PATH`. There are
