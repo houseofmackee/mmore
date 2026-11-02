@@ -53,6 +53,12 @@ def set_size(fd, rows, cols):
 
 #: Longest any single run may take before it is killed and counted as a failure.
 RUN_TIMEOUT = 30
+#: How long to wait for the first pager frame (slow CI machines can take seconds).
+START_WAIT = 10
+#: How long to wait for output to start after a key.
+KEY_WAIT = 5.0
+#: Status line texts that end a complete pager frame.
+FRAME_MARKERS = (b"--More--", b"(END)", b"(waiting for input)", b"Following new input", b"Contents:")
 
 
 def finish(pid, fd, out=b""):
@@ -87,11 +93,15 @@ def spawn(cmd, env, rows, cols):
     return pid, fd
 
 
-def run(cmd, keys, rows=10, cols=80, resize=None, env=None):
+def run(cmd, keys, rows=10, cols=80, resize=None, env=None, frame=True):
     """Run `cmd`, send `keys` one at a time, and return (output, exit code, snapshots).
 
-    After each key, output is read until it has been quiet for a moment. A
-    snapshot of everything read so far is taken at the start and after each key.
+    At the start, output is read until a complete pager frame (its status line)
+    has appeared or the program has ended, however long a slow machine takes.
+    With `frame=False` (for printing without a pager), only until it is quiet.
+    After each key, output is read until it has been quiet for a moment, waiting
+    up to KEY_WAIT for it to start. A snapshot of everything read so far is taken
+    at the start and after each key.
     "WAIT" pauses (for background work), "PAUSE" waits briefly, "RESIZE"
     applies `resize` (rows, cols), ("UNTIL", text) reads until `text` appears
     (at most 10 s; for complete frames on slow machines), and a function is
@@ -100,7 +110,8 @@ def run(cmd, keys, rows=10, cols=80, resize=None, env=None):
     pid, fd = spawn(cmd, clean_env(env), rows, cols)
     out = b""
 
-    def drain(first=2.0, quiet=0.3):
+    def drain(first=KEY_WAIT, quiet=0.3):
+        """Read until quiet; returns True once the program's output has ended."""
         nonlocal out
         start = time.time()
         got = False
@@ -108,17 +119,22 @@ def run(cmd, keys, rows=10, cols=80, resize=None, env=None):
             wait = quiet if got else max(0.05, first - (time.time() - start))
             r, _, _ = select.select([fd], [], [], wait)
             if not r:
-                return
+                return False
             try:
                 data = os.read(fd, 65536)
             except OSError:
-                return
+                return True
             if not data:
-                return
+                return True
             out += data
             got = True
 
-    drain(3.0)
+    deadline = time.time() + START_WAIT
+    ended = not frame and drain(first=3.0)
+    while frame and not ended and not any(m in out for m in FRAME_MARKERS) and time.time() < deadline:
+        ended = drain(first=0.5, quiet=0.1)
+    if frame and not ended:
+        drain(first=0.3)
     snapshots = [out]
     for k in keys:
         if isinstance(k, tuple) and k[0] == "UNTIL":
@@ -557,7 +573,7 @@ def streaming():
     )
 
     # Printing (output is a pipe): lines are copied as they arrive.
-    out, code, snaps = run(f"(echo first; sleep 2; echo second) | {BIN} | cat", [], rows=10, cols=40)
+    out, code, snaps = run(f"(echo first; sleep 2; echo second) | {BIN} | cat", [], rows=10, cols=40, frame=False)
     early = snaps[0].decode(errors="replace")
     check("printing copies piped input before it ends", "first" in early and "second" not in early)
     out, code, _ = run(f"(echo first; sleep 1; echo second) | {BIN} | cat", ["WAIT"], rows=10, cols=40)
