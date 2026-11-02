@@ -611,3 +611,72 @@ fn regular_files_are_not_streamed() {
         .success()
         .stdout(predicate::str::contains("═".repeat(20)));
 }
+
+#[test]
+fn colors_in_piped_input_are_shown_as_styles() {
+    mmore_env()
+        .args(["--color", "always"])
+        .write_stdin("\x1b[31mred\x1b[0m \x1b[1mbold\x1b[22m\n")
+        .assert()
+        .success()
+        .stdout("\x1b[31mred\x1b[0m \x1b[1mbold\x1b[0m\n");
+}
+
+#[test]
+fn colors_are_removed_when_output_is_plain() {
+    // Piped output: the text without codes, ready for grep.
+    mmore_env()
+        .write_stdin("\x1b[31mred\x1b[0m\x1b[K done\n")
+        .assert()
+        .success()
+        .stdout("red done\n");
+}
+
+#[test]
+fn show_escapes_keeps_codes_visible() {
+    mmore_env()
+        .arg("--show-escapes")
+        .write_stdin("\x1b[31mred\x1b[0m\n")
+        .assert()
+        .success()
+        .stdout("^[[31mred^[[0m\n");
+}
+
+#[test]
+fn man_page_overstriking_becomes_bold_and_underline() {
+    mmore_env()
+        .write_stdin("N\x08NA\x08AM\x08ME\x08E _\x08f\n")
+        .assert()
+        .success()
+        .stdout("NAME f\n");
+    mmore_env()
+        .args(["--color", "always"])
+        .write_stdin("N\x08NA\x08AM\x08ME\x08E _\x08f\n")
+        .assert()
+        .success()
+        .stdout("\x1b[1mNAME\x1b[0m \x1b[4mf\x1b[0m\n");
+}
+
+#[test]
+fn colors_in_plain_files_but_not_in_code() {
+    let dir = std::env::temp_dir().join(format!("mmore-colors-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("build.log");
+    std::fs::write(&log, "\x1b[32mok\x1b[0m\n").unwrap();
+    mmore_env()
+        .args(["--color", "always"])
+        .arg(&log)
+        .assert()
+        .success()
+        .stdout("\x1b[32mok\x1b[0m\n");
+    // In a code file an escape character is part of the source: shown, not run.
+    let code = dir.join("x.rs");
+    std::fs::write(&code, "let s = \"\x1b[31m\";\n").unwrap();
+    mmore_env()
+        .args(["--color", "always"])
+        .arg(&code)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("^[[31m"));
+    std::fs::remove_dir_all(dir).unwrap();
+}

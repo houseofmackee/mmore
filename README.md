@@ -50,9 +50,11 @@ somewhere else, add `--root DIR` (the binary goes in `DIR/bin`).
   from the top while you read.
 - **Fits the terminal**: everything re-flows when the window is resized, and
   output that fits on one screen is printed without starting the pager.
+- **Colors in the input**: output from `git log --color`, `ls --color`, compilers,
+  and `man` keeps its colors, bold, and underline, like `less -R`.
 - **Plays well with pipes**: piped input is shown while it is still arriving
   (`F` follows new input, like `less`), and when the output is not a terminal,
-  `mmore` passes its input through unchanged, like `cat`.
+  `mmore` prints plain text, like `cat`.
 
 ## Keys
 
@@ -95,6 +97,7 @@ uppercase letter. An empty pattern repeats the previous search.
 | `-e`, `--exit-at-eof` | Quit when paging past the end, like classic `more` |
 | `--no-pager`, `--always-page` | Never page, or page even short input |
 | `--mouse` | Scroll with the mouse wheel (see below) |
+| `--show-escapes` | Show escape codes in plain text (`^[[31m`) instead of their colors |
 | `--force` | Show binary files anyway |
 
 Run `mmore --help` for the full list.
@@ -155,10 +158,24 @@ for piped input always leave room for five digits, since its length is unknown.
 
 ## When output is not a terminal
 
-If the output goes to a pipe or a file, `mmore` prints its input as is: no
-rendering, no colors, and no pager. Piped input is copied through as it arrives,
-so `tail -f app.log | mmore | grep error` works. This keeps `mmore file | grep x`
-working as expected. Add `--color always` to get rendered, colored output anyway.
+If the output goes to a pipe or a file, `mmore` prints plain text: no rendering,
+no colors, and no pager. Markdown and code are printed as written; color codes in
+plain text are removed, so `mmore build.log | grep error` matches the text you
+see. Tabs become spaces and other control characters are shown as `^X`. Piped
+input is copied through as it arrives, so `tail -f app.log | mmore | grep error`
+works. Add `--color always` to get rendered, colored output anyway.
+
+## Colors in the input
+
+Plain text keeps the colors and attributes it was written with: color codes from
+tools such as `git`, `ls`, `grep --color`, and compilers, and the backspace
+overstriking that `man` uses for bold and underline. The codes are turned into
+`mmore`'s own styles rather than passed to the terminal, so search, wrapping, and
+widths work on the visible text, and nothing in the input can move the cursor or
+change terminal settings. Other control sequences (such as erase line in progress
+output) are removed; unknown ones are shown as `^[`. Markdown and code files are
+not affected: their own rendering and highlighting apply. `--show-escapes` shows
+the codes as text instead, which helps when debugging colored output.
 
 ## Development
 

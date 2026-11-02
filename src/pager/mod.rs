@@ -1088,7 +1088,7 @@ mod tests {
     /// A document with one streamed file fed through a pipe.
     fn streamed() -> (Document, std::io::PipeWriter) {
         let (reader, writer) = std::io::pipe().unwrap();
-        let stream = Stream::spawn(reader, "(standard input)".into(), false, false);
+        let stream = Stream::spawn(reader, "(standard input)".into(), false, false, true);
         let mut d = doc(&[]);
         d.files.push(File {
             name: "(standard input)".into(),

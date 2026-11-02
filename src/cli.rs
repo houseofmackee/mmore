@@ -136,6 +136,10 @@ pub struct Cli {
     #[arg(long)]
     pub mouse: bool,
 
+    /// Show escape sequences in plain text as codes (^[[31m) instead of colors.
+    #[arg(long)]
+    pub show_escapes: bool,
+
     /// Display binary files anyway.
     #[arg(long)]
     pub force: bool,

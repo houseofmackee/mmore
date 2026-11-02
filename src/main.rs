@@ -188,10 +188,25 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
 }
 
 fn text_file(cli: &Cli, origin: &Origin, text: String, settings: &Settings) -> File {
+    let kind = content_kind(cli, origin, &text, settings);
+    // Plain text shows the colors in it (as from `git log --color`); the raw view
+    // of Markdown and code shows their source as written.
+    let raw = if matches!(kind, Kind::Plain) && !cli.show_escapes {
+        render::plain::render_colored(&text)
+    } else {
+        render::plain::render(&text)
+    };
+    let content = match kind {
+        Kind::Plain => Section::Plain,
+        Kind::Markdown => Section::Markdown(text),
+        Kind::Code(syntax) => {
+            Section::Code(Arc::new(LazyHighlight::new(text, syntax, settings.theme)))
+        }
+    };
     File {
         name: origin.display_name(),
-        raw: render::plain::render(&text),
-        content: section(cli, origin, text, settings),
+        raw,
+        content,
         stream: None,
     }
 }
@@ -233,7 +248,13 @@ fn stream_input(
     reader: impl std::io::Read + Send + 'static,
 ) -> File {
     let name = origin.display_name();
-    let stream = Stream::spawn(reader, name.clone(), cli.force, settings.render);
+    let stream = Stream::spawn(
+        reader,
+        name.clone(),
+        cli.force,
+        settings.render,
+        !cli.show_escapes,
+    );
     stream.wait_for(1, Some(FIRST_LINE_WAIT));
     if settings.render && !stream.is_binary() {
         let first = stream.line(0).map(|l| l.text()).unwrap_or_default();
@@ -253,9 +274,11 @@ fn stream_input(
     }
 }
 
-fn section(cli: &Cli, origin: &Origin, text: String, settings: &Settings) -> Section {
+/// How a file's content will be shown: rendered Markdown, highlighted code, or
+/// plain text (when rendering is off, highlighting is pointless, or nothing fits).
+fn content_kind(cli: &Cli, origin: &Origin, text: &str, settings: &Settings) -> Kind {
     if !settings.render {
-        return Section::Plain;
+        return Kind::Plain;
     }
     let first_line = text.lines().next().unwrap_or("");
     let kind = detect::detect(
@@ -265,11 +288,8 @@ fn section(cli: &Cli, origin: &Origin, text: String, settings: &Settings) -> Sec
         cli.language.as_deref(),
     );
     match kind {
-        Kind::Markdown => Section::Markdown(text),
-        Kind::Code(syntax) if settings.highlight => {
-            Section::Code(Arc::new(LazyHighlight::new(text, syntax, settings.theme)))
-        }
-        Kind::Code(_) | Kind::Plain => Section::Plain,
+        Kind::Code(_) if !settings.highlight => Kind::Plain,
+        kind => kind,
     }
 }
 

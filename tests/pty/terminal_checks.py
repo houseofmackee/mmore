@@ -351,6 +351,20 @@ def background():
     check("no background query without colors", b"\x1b]11;?" not in out)
 
 
+def input_colors(tmp):
+    log = os.path.join(tmp, "colors.log")
+    with open(log, "w") as f:
+        for i in range(1, 31):
+            f.write(f"\x1b[31mred {i}\x1b[0m and \x1b[1;32mgreen\x1b[0m\x1b[K\n")
+    out, code, snaps = run(f"{BIN} {log}", ["/", "r", "e", "d", " ", "2", "\r", "q"], rows=10, cols=40)
+    first = snaps[0].decode(errors="replace")
+    check("colors in the input are shown in the pager", "\x1b[31mred 1\x1b[0m" in first and "\x1b[1;32mgreen" in first)
+    check("no escape codes are shown as text", "^[" not in out)
+    check("search highlights combine with input colors", "\x1b[7;31mred 2" in after(snaps, 6))
+    out, code, _ = run(f"{BIN} --show-escapes {log}", ["q"], rows=10, cols=60)
+    check("--show-escapes shows the codes", "^[[31mred 1^[[0m" in out)
+
+
 def streaming():
     # A producer that pauses: the first lines must show before it finishes.
     slow = f"(seq 1 5; sleep 3; seq 6 40) | {BIN}"
@@ -458,6 +472,7 @@ def main():
         links = hyperlinks(tmp)
         pager_features(n100, links)
         mouse(n100)
+        input_colors(tmp)
         streaming()
         suspend(n100)
         background()

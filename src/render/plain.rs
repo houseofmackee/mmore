@@ -2,6 +2,7 @@
 
 use unicode_width::UnicodeWidthChar;
 
+use super::escapes::Parser;
 use crate::style::Line;
 
 pub const TAB_WIDTH: usize = 8;
@@ -9,6 +10,13 @@ pub const TAB_WIDTH: usize = 8;
 /// Render text into lines, expanding tabs and making control characters visible.
 pub fn render(text: &str) -> Vec<Line> {
     text.lines().map(|l| sanitize(&Line::plain(l))).collect()
+}
+
+/// Like `render`, but colors and attributes in the input (escape sequences and
+/// backspace overstriking) become styles instead of visible codes.
+pub fn render_colored(text: &str) -> Vec<Line> {
+    let mut parser = Parser::new();
+    text.lines().map(|l| sanitize(&parser.line(l))).collect()
 }
 
 /// Expand tabs to the next tab stop and show control characters in caret notation
@@ -86,6 +94,20 @@ mod tests {
         assert_eq!(one("\x7f"), "^?");
         assert_eq!(one("\x01"), "^A");
         assert_eq!(one("\u{9b}"), "<U+009B>");
+    }
+
+    #[test]
+    fn colored_rendering() {
+        let lines = render_colored("\x1b[31mred\tx\x1b[0m\nb\x08bold\n\x1bZ");
+        assert_eq!(lines[0].text(), "red     x");
+        assert_eq!(
+            lines[0].spans[0].style.fg,
+            Some(crate::style::Color::Ansi(1))
+        );
+        assert_eq!(lines[1].text(), "bold");
+        assert!(lines[1].spans[0].style.bold);
+        // Unknown escapes are still shown, not passed through.
+        assert_eq!(lines[2].text(), "^[Z");
     }
 
     #[test]

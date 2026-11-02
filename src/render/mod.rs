@@ -1,6 +1,7 @@
 //! Turning source text into displayable lines.
 
 pub mod code;
+pub mod escapes;
 pub mod markdown;
 pub mod plain;
 pub mod symbols;

@@ -9,6 +9,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::render::escapes::Parser;
 use crate::render::plain;
 use crate::source::looks_binary;
 use crate::style::Line;
@@ -34,12 +35,14 @@ struct State {
 impl Stream {
     /// Start reading `reader` in the background. With `keep_text`, the raw text is
     /// also kept (see `take_text`). Unless `force` is set, input that looks binary
-    /// is replaced by a short message, as for files.
+    /// is replaced by a short message, as for files. With `colors`, colors in the
+    /// input become styles (see `plain::render_colored`).
     pub fn spawn(
         reader: impl Read + Send + 'static,
         name: String,
         force: bool,
         keep_text: bool,
+        colors: bool,
     ) -> Arc<Stream> {
         let stream = Arc::new(Stream {
             state: Mutex::new(State {
@@ -51,7 +54,7 @@ impl Stream {
             changed: Condvar::new(),
         });
         let worker = Arc::clone(&stream);
-        thread::spawn(move || worker.read_all(reader, &name, force));
+        thread::spawn(move || worker.read_all(reader, &name, force, colors));
         stream
     }
 
@@ -59,7 +62,8 @@ impl Stream {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn read_all(&self, reader: impl Read, name: &str, force: bool) {
+    fn read_all(&self, reader: impl Read, name: &str, force: bool, colors: bool) {
+        let mut parser = colors.then(Parser::new);
         let mut reader = BufReader::with_capacity(64 * 1024, reader);
         let mut buf = Vec::new();
         let mut sniffed = 0;
@@ -85,7 +89,11 @@ impl Stream {
             let body = decoded
                 .strip_suffix('\n')
                 .map_or(&*decoded, |l| l.strip_suffix('\r').unwrap_or(l));
-            batch.push(plain::sanitize(&Line::plain(body)));
+            let line = match &mut parser {
+                Some(parser) => parser.line(body),
+                None => Line::plain(body),
+            };
+            batch.push(plain::sanitize(&line));
             // Publish when the next read would wait for input, or the batch is big.
             if reader.buffer().is_empty() || batch.len() >= BATCH {
                 self.publish(&mut batch, &mut text, false);
@@ -202,12 +210,21 @@ mod tests {
     #[test]
     fn reads_lines_like_plain_render() {
         let input = "a\r\nb\tc\n\x1b[31m\nlast";
-        let s = Stream::spawn(Cursor::new(input), "x".into(), false, true);
+        let s = Stream::spawn(Cursor::new(input), "x".into(), false, true, false);
         assert_eq!(s.wait_for(usize::MAX, None), (4, true));
         assert_eq!(texts(&s.lines_from(0)), texts(&plain::render(input)));
         assert_eq!(s.take_text().as_deref(), Some(input));
         assert_eq!(texts(&s.lines_from(2)), vec!["^[[31m", "last"]);
         assert!(s.lines_from(10).is_empty());
+    }
+
+    #[test]
+    fn colors_carry_across_lines_like_render_colored() {
+        let input = "\x1b[31mred\nstill red\x1b[0m\nplain\n";
+        let s = Stream::spawn(Cursor::new(input), "x".into(), false, false, true);
+        s.wait_for(usize::MAX, None);
+        assert_eq!(s.lines_from(0), plain::render_colored(input));
+        assert!(s.line(1).unwrap().spans[0].style.fg.is_some());
     }
 
     #[test]
@@ -217,6 +234,7 @@ mod tests {
             "(standard input)".into(),
             false,
             true,
+            true,
         );
         s.wait_for(usize::MAX, None);
         assert!(s.is_binary());
@@ -225,7 +243,13 @@ mod tests {
             "******** (standard input): Not a text file ********"
         );
         assert!(s.take_text().is_none());
-        let forced = Stream::spawn(Cursor::new(b"ab\0cd\n".to_vec()), "x".into(), true, false);
+        let forced = Stream::spawn(
+            Cursor::new(b"ab\0cd\n".to_vec()),
+            "x".into(),
+            true,
+            false,
+            true,
+        );
         forced.wait_for(usize::MAX, None);
         assert_eq!(forced.line(0).unwrap().text(), "ab^@cd");
     }
@@ -251,7 +275,7 @@ mod tests {
     #[test]
     fn lines_appear_while_input_is_still_open() {
         let (tx, rx) = mpsc::channel();
-        let s = Stream::spawn(Feed(rx, Vec::new()), "x".into(), false, false);
+        let s = Stream::spawn(Feed(rx, Vec::new()), "x".into(), false, false, true);
         tx.send(b"one\ntwo\n".to_vec()).unwrap();
         assert_eq!(s.wait_for(2, Some(Duration::from_secs(5))), (2, false));
         // No more input yet: waiting times out without the input ending.
