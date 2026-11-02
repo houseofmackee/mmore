@@ -26,7 +26,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ansi::{self, ColorMode};
 use crate::document::{Document, File, LazyHighlight, gutter_span};
-use crate::render::{Heading, Rendered};
+use crate::render::{Heading, Rendered, is_absolute_url, slugs};
 use crate::stream::Stream;
 use crate::style::Line;
 use crate::wrap::{Wrapped, column_of, slice_columns, wrap_all, wrap_line};
@@ -248,6 +248,11 @@ struct Pager<'a> {
     /// While a search is being typed: how things were before, to go back to
     /// on Esc (search as you type moves the view).
     search_origin: Option<SearchOrigin>,
+    /// The link selected with Tab (an index into the view's link table), which
+    /// Enter follows.
+    selected_link: Option<u32>,
+    /// Places left by following links, for Backspace.
+    history: Vec<(usize, usize)>,
 }
 
 /// The state that search as you type changes, saved when the prompt opens.
@@ -312,6 +317,8 @@ impl<'a> Pager<'a> {
             marks: std::collections::HashMap::new(),
             last_place: None,
             search_origin: None,
+            selected_link: None,
+            history: Vec::new(),
         };
         pager.layout(0);
         pager
@@ -423,6 +430,27 @@ impl<'a> Pager<'a> {
         }
         if self.toc.is_some() {
             return self.toc_key(key, action);
+        }
+
+        // A selected link stays selected only while Tab moves between links.
+        let selected = self.selected_link.take();
+        match (action, selected) {
+            (Action::LineDown, Some(link)) if key.code == KeyCode::Enter => {
+                self.count = None;
+                self.follow_link(link);
+                return Flow::Continue;
+            }
+            (Action::NextLink | Action::PrevLink, _) => {
+                self.count = None;
+                self.select_link(action == Action::NextLink, selected);
+                return Flow::Continue;
+            }
+            (Action::Back, _) => {
+                self.count = None;
+                self.go_back();
+                return Flow::Continue;
+            }
+            _ => {}
         }
 
         // A count (as in `120g`) applies to the next key.
@@ -570,6 +598,7 @@ impl<'a> Pager<'a> {
 
     /// Scroll on mouse wheel turns. Returns whether the screen needs a redraw.
     fn mouse(&mut self, kind: MouseEventKind) -> bool {
+        self.selected_link = None;
         let delta = match kind {
             MouseEventKind::ScrollDown => WHEEL_ROWS,
             MouseEventKind::ScrollUp => -WHEEL_ROWS,
@@ -718,6 +747,135 @@ impl<'a> Pager<'a> {
         let row = self.view.wrapped.first_row_of(source);
         let vp = &mut self.view.vp;
         vp.top = row.min(vp.max_top());
+    }
+
+    /// Tab and Shift-Tab: select the next or previous link, starting from the
+    /// screen, scrolling to it if needed.
+    fn select_link(&mut self, forward: bool, selected: Option<u32>) {
+        let order = link_order(&self.view.wrapped);
+        if order.is_empty() {
+            self.message = Some("No links here".into());
+            return;
+        }
+        let top = self.view.vp.top;
+        let bottom = top + self.view.vp.height;
+        let current = selected.and_then(|s| order.iter().position(|&(_, i)| i == s));
+        let target = match current {
+            Some(p) if forward => (p + 1 < order.len()).then_some(p + 1),
+            Some(p) => p.checked_sub(1),
+            None if forward => order.iter().position(|&(row, _)| row >= top),
+            None => order.iter().rposition(|&(row, _)| row < bottom),
+        };
+        let Some(target) = target else {
+            self.selected_link = selected;
+            self.message = Some("No more links".into());
+            return;
+        };
+        let (row, link) = order[target];
+        self.selected_link = Some(link);
+        let vp = &mut self.view.vp;
+        if row < top || row >= bottom {
+            vp.top = row.saturating_sub(vp.height / 3).min(vp.max_top());
+        }
+        let url = &self.view.wrapped.links[link as usize];
+        self.message = Some(format!(
+            "Link: {url}  (Enter follows it, Backspace comes back)"
+        ));
+    }
+
+    /// Enter on a selected link: a heading in this file (`#usage`), another local
+    /// file (`docs/guide.md`, maybe with a heading), or a web page.
+    fn follow_link(&mut self, link: u32) {
+        let Some(url) = self.view.wrapped.links.get(link as usize).cloned() else {
+            return;
+        };
+        if let Some(path) = url.strip_prefix("file://") {
+            self.follow_local(path);
+        } else if is_absolute_url(&url) {
+            open_in_browser(&url, &mut self.message);
+        } else {
+            self.follow_local(&url);
+        }
+    }
+
+    fn follow_local(&mut self, target: &str) {
+        let (path, fragment) = match target.split_once('#') {
+            Some((path, fragment)) => (path, Some(fragment)),
+            None => (target, None),
+        };
+        let path = percent_decode(path);
+        let from = self.place();
+        if !path.is_empty() {
+            let base = self.doc.files[self.file]
+                .path
+                .as_deref()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
+            let Some(file) = self.open_linked(&base.join(&path)) else {
+                return;
+            };
+            self.switch_file(file);
+        }
+        if let Some(fragment) = fragment.filter(|f| !f.is_empty()) {
+            let wanted = percent_decode(fragment).to_lowercase();
+            match slugs(&self.view.headings).iter().position(|s| *s == wanted) {
+                Some(index) => self.go_to_heading(index),
+                None => {
+                    self.message = Some(format!("No heading #{wanted} here"));
+                    if path.is_empty() {
+                        return;
+                    }
+                }
+            }
+        } else if path.is_empty() {
+            return;
+        }
+        self.history.push(from);
+        self.last_place = Some(from);
+    }
+
+    /// The index of the file at `path`, loading it if it is not open yet.
+    fn open_linked(&mut self, path: &Path) -> Option<usize> {
+        let Ok(real) = path.canonicalize() else {
+            self.message = Some(format!("Cannot open {}: not found", path.display()));
+            return None;
+        };
+        let open = self.doc.files.iter().position(|f| {
+            f.path
+                .as_deref()
+                .and_then(|p| p.canonicalize().ok())
+                .is_some_and(|p| p == real)
+        });
+        if open.is_some() {
+            return open;
+        }
+        if real.is_dir() {
+            self.message = Some(format!("Cannot open {}: a directory", path.display()));
+            return None;
+        }
+        let file = self.opts.reload.and_then(|load| load(path));
+        let Some(file) = file else {
+            self.message = Some(format!("Cannot open {}", path.display()));
+            return None;
+        };
+        self.doc.files.push(file);
+        let index = self.doc.files.len() - 1;
+        self.doc.start_highlighting_file(index);
+        self.positions.push(0);
+        self.stamps.push(stamp(path));
+        Some(index)
+    }
+
+    /// Backspace: back to where the last followed link was.
+    fn go_back(&mut self) {
+        match self.history.pop() {
+            Some(place) => {
+                self.remember_place();
+                self.go_to_place(place);
+            }
+            None => self.message = Some("No link to go back from".into()),
+        }
     }
 
     /// `m` and a letter.
@@ -1312,7 +1470,14 @@ impl<'a> Pager<'a> {
                     .push(gutter_span(first.then_some(source + 1), view.gutter));
             }
             let ranges = view.matches.ranges.get(r).map_or(&[][..], Vec::as_slice);
-            let content = search::highlight(&row, ranges);
+            let mut content = search::highlight(&row, ranges);
+            if let Some(link) = self.selected_link.filter(|_| self.help.is_none()) {
+                for span in &mut content.spans {
+                    if span.style.link == Some(link) {
+                        span.style.reverse = !span.style.reverse;
+                    }
+                }
+            }
             if self.chop && self.help.is_none() {
                 let width = self.content_width(view.gutter);
                 line.append(slice_columns(&content, self.hscroll, width));
@@ -1386,6 +1551,81 @@ fn keep_matching(rendered: Rendered, filter: &Search) -> Rendered {
         }
     }
     out
+}
+
+/// Links in the order they appear: the first row each is on, and its index.
+fn link_order(wrapped: &Wrapped) -> Vec<(usize, u32)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut order = Vec::new();
+    for (row, line) in wrapped.rows.iter().enumerate() {
+        for span in &line.spans {
+            if let Some(link) = span.style.link
+                && seen.insert(link)
+            {
+                order.push((row, link));
+            }
+        }
+    }
+    order
+}
+
+/// Decode `%20` and the like in a link to a file.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                i += 3;
+            }
+            (byte, _) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Open a web or mail link with the system's handler. Other schemes are not
+/// opened: `open` would also launch applications.
+fn open_in_browser(url: &str, message: &mut Option<String>) {
+    let lower = url.to_ascii_lowercase();
+    if !["http://", "https://", "mailto:"]
+        .iter()
+        .any(|scheme| lower.starts_with(scheme))
+    {
+        *message = Some(format!("Cannot open {url} from here"));
+        return;
+    }
+    if cfg!(test) {
+        *message = Some(format!("Opening {url}"));
+        return;
+    }
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let spawned = std::process::Command::new(program)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    *message = Some(match spawned {
+        Ok(mut child) => {
+            std::thread::spawn(move || child.wait());
+            format!("Opening {url}")
+        }
+        Err(e) => format!("Cannot run {program}: {e}"),
+    });
 }
 
 fn empty_view() -> View {
@@ -1478,6 +1718,8 @@ mod tests {
                 '\n' => KeyCode::Enter,
                 '\x1b' => KeyCode::Esc,
                 '\x08' => KeyCode::Backspace,
+                '\t' => KeyCode::Tab,
+                '\u{2190}' => KeyCode::BackTab,
                 c => KeyCode::Char(c),
             };
             flow = p.key(KeyEvent::new(code, KeyModifiers::NONE));
@@ -2226,6 +2468,101 @@ mod tests {
             .unwrap()
             .set_modified(later)
             .unwrap();
+    }
+
+    fn read_markdown(path: &Path) -> Option<File> {
+        let text = std::fs::read_to_string(path).ok()?;
+        Some(File {
+            name: path.display().to_string(),
+            path: Some(path.to_path_buf()),
+            content: Section::Markdown(text.clone()),
+            raw: plain::render(&text),
+            stream: None,
+        })
+    }
+
+    /// Paragraphs "para 1" to "para n", one line each.
+    fn paras(n: usize) -> String {
+        (1..=n).map(|i| format!("para {i}\n\n")).collect()
+    }
+
+    #[test]
+    fn links_are_selected_followed_and_left_again() {
+        let dir = std::env::temp_dir().join(format!("mmore-links-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        let readme = format!(
+            "# Top\n\n[guide](docs/guide%20one.md#second-part)\n\n[down](#later)\n\n\
+             [web](https://example.com)\n\n[gone](missing.md)\n\n{0}## Later\n\n{0}",
+            paras(20)
+        );
+        let guide = format!(
+            "# Guide\n\n{0}## Second part\n\n[back](../README.md)\n\n{0}",
+            paras(20)
+        );
+        std::fs::write(dir.join("README.md"), &readme).unwrap();
+        std::fs::write(dir.join("docs/guide one.md"), &guide).unwrap();
+        let mut d = doc(&[("README.md", &readme)]);
+        d.files[0].path = Some(dir.join("README.md"));
+        let opts = Options {
+            reload: Some(&read_markdown),
+            ..OPTS
+        };
+        let mut p = Pager::new(d, &opts, 60, 6);
+
+        press(&mut p, "\t");
+        let message = p.message.clone().unwrap();
+        assert!(
+            message.starts_with("Link: docs/guide%20one.md#second-part"),
+            "{message}"
+        );
+        press(&mut p, "\t\t\t\t");
+        assert_eq!(p.message.as_deref(), Some("No more links"));
+        press(&mut p, "\u{2190}");
+        assert!(
+            p.message
+                .as_deref()
+                .unwrap()
+                .starts_with("Link: https://example.com")
+        );
+        press(&mut p, "\n");
+        assert_eq!(p.message.as_deref(), Some("Opening https://example.com"));
+
+        // An anchor in the same file, and back.
+        press(&mut p, "g\t\t");
+        let at_link = p.view.vp.top;
+        press(&mut p, "\n");
+        assert!(top_text(&p).contains("Later"), "{}", top_text(&p));
+        press(&mut p, "\x08");
+        // Places are kept by source line, like marks.
+        assert_eq!(p.file, 0);
+        assert!(p.view.vp.top.abs_diff(at_link) <= 1);
+        press(&mut p, "g");
+
+        // Another file, at a heading; its link back reuses the open file.
+        press(&mut p, "\t\n");
+        assert_eq!(p.file, 1);
+        assert!(top_text(&p).contains("Second part"), "{}", top_text(&p));
+        press(&mut p, "\t\n");
+        assert_eq!((p.file, p.doc.files.len()), (0, 2));
+        press(&mut p, "\x08");
+        assert_eq!(p.file, 1);
+        press(&mut p, "\x08");
+        assert_eq!((p.file, p.view.vp.top), (0, 0));
+        press(&mut p, "\x08");
+        assert_eq!(p.message.as_deref(), Some("No link to go back from"));
+
+        // A missing file; and Enter without a selected link scrolls as usual.
+        press(&mut p, "\t\t\t\t\n");
+        assert!(
+            p.message.as_deref().unwrap().starts_with("Cannot open"),
+            "{:?}",
+            p.message
+        );
+        assert_eq!(p.file, 0);
+        let top = p.view.vp.top;
+        press(&mut p, "\n");
+        assert_eq!(p.view.vp.top, top + 1);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -82,6 +82,9 @@ somewhere else, add `--root DIR` (the binary goes in `DIR/bin`).
 | `r` | Switch between the rendered view and the raw source |
 | `m` + letter, `'` + letter | Mark the current place / go back to that mark |
 | `''` | Go back to where you were before the last jump |
+| `Tab` / `Shift-Tab` | Select the next / previous link (Markdown) |
+| `Enter` | Follow the selected link (see [Following links](#following-links)) |
+| `Backspace` | Go back to where the last followed link was |
 | `v` | Edit the file in `$VISUAL` or `$EDITOR`, at the current line, then reload it |
 | `R` | Reload the file |
 | `h` | Help |
@@ -160,8 +163,25 @@ headings and search matches stay visible.
 Links in Markdown become clickable (OSC 8 hyperlinks) in terminals known to
 support them, including iTerm2, WezTerm, Warp, kitty, Ghostty, foot, Konsole,
 Windows Terminal, and VS Code. Only absolute URLs (such as `https://` and `mailto:`)
-are clickable; relative paths are shown but cannot be opened from a terminal. Use
-`--hyperlinks always` or `never` to override the detection.
+are clickable this way; relative paths can be followed in the pager instead (see
+below). Use `--hyperlinks always` or `never` to override the detection.
+
+## Following links
+
+While paging Markdown, `Tab` selects the next link on the screen (shown in reverse
+video, with its target in the status line) and `Shift-Tab` the previous one;
+`Enter` follows the selected link:
+
+- A link to a heading in the same file (`#usage`) jumps to that heading, using the
+  anchors GitHub gives headings.
+- A link to another local file (`docs/guide.md`, or `docs/guide.md#install`) opens
+  that file in `mmore`, relative to the directory of the current file. It is added
+  to the files being paged, so `:n` and `:p` reach it too.
+- A web or mail link (`https://`, `mailto:`) is opened with `open` on macOS or
+  `xdg-open` elsewhere. Other kinds of URLs are not opened.
+
+`Backspace` goes back to where you were when you followed the link, one link at a
+time. Any other key leaves the selection, so `Enter` scrolls as usual again.
 
 ## Piped input
 

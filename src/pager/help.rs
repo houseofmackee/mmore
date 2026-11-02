@@ -41,6 +41,12 @@ const KEYS: &[(&str, &str)] = &[
     ("r", "Toggle rendered view and raw source"),
     ("mX  'X", "Mark this place as letter X / go back to mark X"),
     ("''", "Go back to where you were before the last jump"),
+    ("Tab  Shift-Tab", "Select the next / previous link (Markdown)"),
+    (
+        "Enter",
+        "Follow the selected link: a heading, a file, or a web page",
+    ),
+    ("Backspace", "Go back to where the last followed link was"),
     ("v", "Edit the file ($VISUAL or $EDITOR), then reload it"),
     (
         "R",

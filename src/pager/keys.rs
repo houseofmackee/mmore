@@ -48,6 +48,11 @@ pub enum Action {
     /// Set a mark (`m` and a letter) or go to one (`'` and a letter, `''`).
     SetMark,
     GoToMark,
+    /// Select the next or previous link on screen (Tab, Shift-Tab).
+    NextLink,
+    PrevLink,
+    /// Go back to where the last followed link was (Backspace).
+    Back,
     Quit,
     None,
 }
@@ -108,6 +113,9 @@ pub fn map(key: KeyEvent) -> Action {
         KeyCode::Char('[') => Action::PrevHeading,
         KeyCode::Char('t') => Action::Contents,
         KeyCode::Char('R') => Action::Reload,
+        KeyCode::Tab => Action::NextLink,
+        KeyCode::BackTab => Action::PrevLink,
+        KeyCode::Backspace => Action::Back,
         _ => Action::None,
     }
 }
@@ -126,6 +134,7 @@ pub fn from_bytes(bytes: &[u8]) -> Vec<KeyEvent> {
         i += 1;
         let event = match c {
             '\r' | '\n' => key(KeyCode::Enter),
+            '\t' => key(KeyCode::Tab),
             '\x7f' | '\x08' => key(KeyCode::Backspace),
             '\x1b' if chars.get(i) == Some(&'[') || chars.get(i) == Some(&'O') => {
                 // CSI or SS3: ESC [ A, ESC O A, ESC [ 5 ~, ...
@@ -149,6 +158,7 @@ pub fn from_bytes(bytes: &[u8]) -> Vec<KeyEvent> {
                     ('F', _) | ('~', "4" | "8") => KeyCode::End,
                     ('~', "5") => KeyCode::PageUp,
                     ('~', "6") => KeyCode::PageDown,
+                    ('Z', _) => KeyCode::BackTab,
                     _ => continue,
                 };
                 key(code)
@@ -215,6 +225,9 @@ mod tests {
         assert_eq!(map(key(KeyCode::Char('v'))), Action::Edit);
         assert_eq!(map(key(KeyCode::Char('&'))), Action::Filter);
         assert_eq!(map(ctrl('z')), Action::Suspend);
+        assert_eq!(map(key(KeyCode::Tab)), Action::NextLink);
+        assert_eq!(map(key(KeyCode::BackTab)), Action::PrevLink);
+        assert_eq!(map(key(KeyCode::Backspace)), Action::Back);
     }
 
     #[test]
@@ -234,7 +247,7 @@ mod tests {
                 KeyCode::PageDown,
                 KeyCode::Home,
                 KeyCode::Esc,
-                // ESC [ Z (Shift-Tab) is not a key mmore uses: skipped.
+                KeyCode::BackTab,
                 KeyCode::Char('x'),
             ]
         );

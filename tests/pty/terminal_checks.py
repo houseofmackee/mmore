@@ -12,6 +12,7 @@ Unix only (uses the pty module).
 
 import fcntl
 import os
+import subprocess
 import pty
 import re
 import select
@@ -529,6 +530,34 @@ def reading_documents(tmp):
     out, code, snaps = run(f"{BIN} {n}", ["/", "7", "5", "\x1b", "q"], rows=10, cols=40)
     check("search as you type jumps while typing", "\x1b[1;1H\x1b[2K\x1b[7m75" in after(snaps, 2))
     check("Esc returns to where the search started", "\x1b[1;1H\x1b[2K1" in after(snaps, 3))
+
+    # Tab selects a link, Enter follows it to a heading in another file, and
+    # Backspace comes back.
+    index = os.path.join(tmp, "index.md")
+    with open(index, "w") as f:
+        f.write("# Index\n\nSee [part 3](guide.md#part-3).\n\n" + "More text.\n\n" * 10)
+    out, code, snaps = run(f"{BIN} {index}", ["\t", "\r", "\x7f", "q"], rows=8, cols=40)
+    check("Tab selects a link and shows its target", "Link: guide.md#part-3" in after(snaps, 0))
+    followed = after(snaps, 1)
+    check("Enter follows the link to the heading", "Part 3" in followed.split("\x1b[2;1H")[0] and "[2/2]" in followed)
+    check("Backspace goes back to the link", "Index" in after(snaps, 2) and "[1/2]" in after(snaps, 2))
+
+    # A search with no more matches in this file goes on to the next file.
+    first, second = os.path.join(tmp, "first.txt"), os.path.join(tmp, "second.txt")
+    with open(first, "w") as f:
+        f.write("".join(f"{i}\n" for i in range(1, 30)))
+    with open(second, "w") as f:
+        f.write("x\nneedle\n")
+    out, code, snaps = run(f"{BIN} {first} {second}", list("/needle") + ["\r", "q"], rows=10, cols=60)
+    check("search continues into the next file", "Found in" in after(snaps, 7) and "needle" in after(snaps, 7))
+
+    # Compressed Markdown is decompressed and rendered.
+    packed = os.path.join(tmp, "packed.md")
+    with open(packed, "w") as f:
+        f.write("# Packed title\n\nInside.\n")
+    subprocess.run(["gzip", packed], check=True)
+    out, code, _ = run(f"{BIN} {packed}.gz", [], frame=False)
+    check("compressed Markdown is rendered", "Packed title" in out and "# Packed" not in out and code == 0)
 
 
 def input_colors(tmp):

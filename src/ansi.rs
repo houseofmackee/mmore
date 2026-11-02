@@ -69,9 +69,11 @@ fn depth(colorterm: &str, term: &str) -> ColorMode {
 pub fn render(line: &Line, mode: ColorMode, links: Option<&[String]>) -> String {
     let mut out = String::new();
     for span in &line.spans {
+        // Only absolute URLs can be opened from the terminal.
         let link = links
             .zip(span.style.link)
-            .and_then(|(links, i)| links.get(i as usize).map(|url| (i, url)));
+            .and_then(|(links, i)| links.get(i as usize).map(|url| (i, url)))
+            .filter(|(_, url)| crate::render::is_absolute_url(url));
         if let Some((id, url)) = link {
             out.push_str(&hyperlink_open(id, url));
         }

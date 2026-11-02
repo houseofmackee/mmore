@@ -14,8 +14,8 @@ checked.
 {fg4}────────────────────────────────────────────────────────────{/}
 
 See {u,fg4,link0}the CommonMark spec{/}{dim,link0} (https://spec.commonmark.org){/} or
-{u,fg4,link1}https://example.com{/}. Jump to {u,fg4}the lists section{/} or mail
-{u,fg4,link2}someone@example.com{/}.
+{u,fg4,link1}https://example.com{/}. Jump to {u,fg4,link2}the lists section{/} or mail
+{u,fg4,link3}someone@example.com{/}.
 
 {dim}### {/}{b,fg6}Lists{/}
 
@@ -66,4 +66,4 @@ Line three after a br tag.
 
 {dim}<div align="center">raw html block</div>{/}
 
-{dim}▣ {/}{i}logo{/}{dim} (images/logo.png){/}
+{dim}▣ {/}{i}logo{/}{dim,link4} (images/logo.png){/}

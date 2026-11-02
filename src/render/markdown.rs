@@ -499,10 +499,10 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    /// Add a hyperlink target. Only absolute URLs can be opened from a terminal,
-    /// so relative paths and in-page anchors get no link.
+    /// Add a link target. All links can be followed in the pager; only absolute
+    /// URLs become terminal hyperlinks (see `ansi::render`).
     fn register_link(&mut self, url: &str) -> Option<u32> {
-        if !is_absolute_url(url) {
+        if url.is_empty() {
             return None;
         }
         self.out.links.push(url.to_string());
@@ -746,17 +746,6 @@ fn show_url(url: &str, text: &str) -> bool {
         && url.strip_prefix("mailto:") != Some(text)
 }
 
-/// A URL with a scheme ("https://...", "mailto:...").
-fn is_absolute_url(url: &str) -> bool {
-    url.split_once(':').is_some_and(|(scheme, rest)| {
-        scheme.len() > 1
-            && scheme
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-            && (rest.starts_with("//") || scheme.eq_ignore_ascii_case("mailto"))
-    })
-}
-
 /// Number of items in the list starting at `events[start]`.
 fn count_items(events: &[(Event, Range<usize>)], start: usize) -> usize {
     let mut depth = 0;
@@ -832,7 +821,7 @@ mod tests {
         assert_eq!(text("<https://x.io>", 40), "https://x.io");
         assert_eq!(text("[top](#top)", 40), "top");
         assert_eq!(text("<me@x.io>", 40), "me@x.io");
-        assert_eq!(marked("[a](u)", 40), "{u,fg4}a{/}{dim} (u){/}");
+        assert_eq!(marked("[a](u)", 40), "{u,fg4,link0}a{/}{dim,link0} (u){/}");
         assert_eq!(
             marked("[a](https://u)", 40),
             "{u,fg4,link0}a{/}{dim,link0} (https://u){/}"
@@ -982,19 +971,22 @@ mod tests {
             "[a](https://a.io) ![img](https://x.io/p.png) [rel](docs/x.md) [top](#top)",
             &opts(80),
         );
-        assert_eq!(r.links, vec!["https://a.io", "https://x.io/p.png"]);
+        assert_eq!(
+            r.links,
+            vec!["https://a.io", "https://x.io/p.png", "docs/x.md", "#top"]
+        );
         let texts: Vec<String> = r.lines.iter().map(markup).collect();
         assert!(texts[0].contains("{u,fg4,link0}a{/}"), "{texts:?}");
         assert!(
             texts[0].contains("{dim,link1} (https://x.io/p.png){/}"),
             "{texts:?}"
         );
-        // Relative links keep their style but are not clickable.
+        // Relative links are registered too, so the pager can follow them.
         assert!(
-            texts[0].contains("{u,fg4}rel{/}{dim} (docs/x.md){/}"),
+            texts[0].contains("{u,fg4,link2}rel{/}{dim,link2} (docs/x.md){/}"),
             "{texts:?}"
         );
-        assert!(texts[0].contains("{u,fg4}top{/}"), "{texts:?}");
+        assert!(texts[0].contains("{u,fg4,link3}top{/}"), "{texts:?}");
     }
 
     #[test]
@@ -1006,6 +998,7 @@ mod tests {
 
     #[test]
     fn absolute_url_detection() {
+        use crate::render::is_absolute_url;
         assert!(is_absolute_url("https://example.com"));
         assert!(is_absolute_url("mailto:a@b.c"));
         assert!(is_absolute_url("file:///tmp/x"));
@@ -1021,7 +1014,7 @@ mod tests {
             text("![a logo](img/logo.png)", 80),
             "▣ a logo (img/logo.png)"
         );
-        assert_eq!(marked("![x](u)", 80), "{dim}▣ {/}{i}x{/}{dim} (u){/}");
+        assert_eq!(marked("![x](u)", 80), "{dim}▣ {/}{i}x{/}{dim,link0} (u){/}");
     }
 
     #[test]

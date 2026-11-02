@@ -11,6 +11,9 @@ section here, so a version can only be released once it has one.
   `guide.md.gz` is rendered as Markdown.
 - With several files, searching goes on into the next (or previous) file once the
   current one has no more matches.
+- Links in Markdown can be followed: `Tab` and `Shift-Tab` select one, `Enter`
+  goes to the heading or local file it points to (or opens a web page in the
+  browser), and `Backspace` goes back.
 
 ## [0.3.0] - 2026-11-02
 

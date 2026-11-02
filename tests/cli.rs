@@ -309,9 +309,10 @@ fn hyperlinks_always_emits_osc8_for_absolute_urls() {
         .args(["--color", "always", "--hyperlinks", "always", MD_EXT])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "\x1b]8;id=mmore0;https://ci.example.com\x1b\\",
-        ))
+        .stdout(
+            predicate::str::is_match(r"\x1b\]8;id=mmore\d+;https://ci\.example\.com\x1b\\")
+                .unwrap(),
+        )
         // Relative image paths are not clickable.
         .stdout(predicate::str::contains("docs/logo.png\x1b\\").not());
 }

@@ -384,6 +384,9 @@ fn output(
     let reload = |path: &std::path::Path| -> Option<File> {
         let origin = Origin::File(path.to_path_buf());
         let source = Source::load(origin.clone()).ok()?;
+        if source.is_binary() && !cli.force {
+            return None;
+        }
         Some(text_file(
             cli,
             &Naming::of(&origin),
