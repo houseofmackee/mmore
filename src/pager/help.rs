@@ -35,6 +35,10 @@ pub const KEYS: &[(&str, &str)] = &[
     ("?pattern", "Search backward"),
     ("/!pattern  &!pattern", "Lines that do not match"),
     (
+        "Up  Down",
+        "In a search, filter, or | prompt: earlier entries (remembered)",
+    ),
+    (
         "Ctrl-K  Ctrl-R",
         "While typing a search: only highlight / plain text, not regex",
     ),

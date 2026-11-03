@@ -5,6 +5,13 @@ section here, so a version can only be released once it has one.
 
 ## [Unreleased]
 
+### Added
+
+- Searches, filters, `|` commands, and marks are remembered between sessions
+  (in `~/.local/state/mmore/history`, or the file in `MMORE_HISTORY`); Up and
+  Down in a prompt go through earlier entries, and marks work again in a later
+  session, opening their file if needed.
+
 ## [0.8.0] - 2026-11-03
 
 ### Added

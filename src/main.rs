@@ -506,6 +506,7 @@ fn output(cli: &Cli, settings: &Settings, document: Document, view: View) -> io:
         Some(text_file(cli, &naming, source.text(), settings))
     };
     let fetch = |url: &str| remote_file(cli, settings, url);
+    let history = cli::history_path();
     pager::run(
         document,
         &pager::Options {
@@ -520,6 +521,7 @@ fn output(cli: &Cli, settings: &Settings, document: Document, view: View) -> io:
             keymap: &keymap,
             start: start.as_ref(),
             keep_screen: cli.keep_screen,
+            history_file: history.as_deref(),
         },
     )
 }

@@ -4,7 +4,9 @@ use predicates::prelude::*;
 fn mmore() -> Command {
     let mut cmd = Command::cargo_bin("mmore").unwrap();
     // Keep the user's own defaults out of the tests.
-    cmd.env_remove("MMORE_OPTS").env("MMORE_CONFIG", "");
+    cmd.env_remove("MMORE_OPTS")
+        .env("MMORE_CONFIG", "")
+        .env("MMORE_HISTORY", "");
     cmd
 }
 

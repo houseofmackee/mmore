@@ -45,6 +45,7 @@ def clean_env(extra=None):
         "TERM": "xterm-256color",
         # Keep the user's own config file out of the checks.
         "MMORE_CONFIG": "",
+        "MMORE_HISTORY": "",
     }
     env.update(extra or {})
     return env
@@ -488,6 +489,18 @@ def start_commands(n100):
     out, code, snaps = run(f"{BIN} -X {n100}", [" ", "q"], rows=10, cols=40)
     kept = out.rsplit(ALT_OFF, 1)[-1].split()
     check("-X leaves the last screen after quitting", kept == [str(i) for i in range(10, 19)], str(kept))
+
+
+def remembered(tmp, n100):
+    # A search is remembered for the next run, and Up brings it back.
+    history = os.path.join(tmp, "state", "history")
+    env = {"MMORE_HISTORY": history}
+    run(f"{BIN} {n100}", ["/", "4", "2", "\r", "q"], rows=10, cols=40, env=env)
+    saved = open(history).read() if os.path.exists(history) else ""
+    check("searches are saved in the history file", "search\t42\n" in saved, repr(saved[-40:]))
+    check("the history file is private", os.path.exists(history) and os.stat(history).st_mode & 0o777 == 0o600)
+    out, code, snaps = run(f"{BIN} {n100}", ["/", "\x1b[A", "\r", "q"], rows=10, cols=40, env=env)
+    check("Up in the search prompt brings back the last search", "/42" in after(snaps, 1) and "\x1b[7m42" in after(snaps, 2))
 
 
 def save_and_pipe(n100):
@@ -1025,6 +1038,7 @@ def main():
         config_keys(tmp, n100)
         start_commands(n100)
         save_and_pipe(n100)
+        remembered(tmp, n100)
         remote_documents(tmp)
         startup_timing(tmp)
         git_pager(tmp)

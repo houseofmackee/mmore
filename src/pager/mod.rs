@@ -6,6 +6,7 @@
 
 mod editor;
 pub mod help;
+mod history;
 pub mod keys;
 mod screen;
 mod search;
@@ -30,6 +31,7 @@ use crate::render::{Heading, Rendered, is_absolute_url, slugs, squeeze_blank};
 use crate::stream::Stream;
 use crate::style::Line;
 use crate::wrap::{Wrapped, column_of, slice_columns, wrap_all, wrap_line};
+use history::{History, Kind as HistoryKind, SavedMark};
 use keys::Action;
 use screen::Screen;
 use search::{RowMatches, Search};
@@ -40,6 +42,7 @@ pub type Reload<'a> = &'a dyn Fn(&Path) -> Option<File>;
 /// Give the terminal back after quitting. With `--keep-screen`, the last screen
 /// is printed in the normal screen afterwards, so it stays in view.
 fn finish(mut pager: Pager, screen: Screen, opts: &Options) -> io::Result<()> {
+    pager.save_history();
     drop(screen);
     if opts.keep_screen {
         // Laid out again for the normal screen, which can be a different size
@@ -119,6 +122,8 @@ pub struct Options<'a> {
     pub start: Option<&'a Start>,
     /// Leave the last screen in the terminal after quitting (`-X`).
     pub keep_screen: bool,
+    /// Where searches, filters, commands, and marks are remembered.
+    pub history_file: Option<&'a Path>,
 }
 
 /// Page the document interactively until the user quits.
@@ -365,6 +370,15 @@ struct Pager<'a> {
     history: Vec<Place>,
     /// Modifiers typed in the search or filter prompt (Ctrl-K, Ctrl-R).
     prompt_modifiers: PromptModifiers,
+    /// Earlier searches, filters, and commands (also from earlier sessions),
+    /// for Up and Down in prompts.
+    remembered: History,
+    /// What this session adds to the history file.
+    session: History,
+    /// Which history entry the prompt shows (Up and Down), if any.
+    history_pos: Option<usize>,
+    /// Marks from earlier sessions in files that are not open.
+    saved_marks: Vec<SavedMark>,
 }
 
 /// Ways to search, chosen with control keys in the prompt, as in less.
@@ -455,9 +469,75 @@ impl<'a> Pager<'a> {
             selected_link: None,
             history: Vec::new(),
             prompt_modifiers: PromptModifiers::default(),
+            remembered: History::default(),
+            session: History::default(),
+            history_pos: None,
+            saved_marks: Vec::new(),
         };
         pager.layout(0);
+        if let Some(path) = opts.history_file {
+            pager.load_history(path);
+        }
         pager
+    }
+
+    /// Earlier searches and such for the prompts, and marks: those in open
+    /// files apply now; the others open their file when used.
+    fn load_history(&mut self, path: &Path) {
+        let mut history = History::load(path);
+        for mark in std::mem::take(&mut history.marks) {
+            let open = self.doc.files.iter().position(|f| {
+                f.url.is_none()
+                    && f.path
+                        .as_deref()
+                        .and_then(|p| p.canonicalize().ok())
+                        .is_some_and(|p| p == mark.path)
+            });
+            match open {
+                Some(file) => {
+                    let place = Place {
+                        file,
+                        source: mark.source,
+                        rows_in: mark.rows_in,
+                    };
+                    self.marks.insert(mark.letter, place);
+                }
+                None => self.saved_marks.push(mark),
+            }
+        }
+        self.remembered = history;
+    }
+
+    /// Remember an entry, for this and later sessions.
+    fn remember(&mut self, kind: HistoryKind, entry: &str) {
+        self.remembered.add(kind, entry);
+        self.session.add(kind, entry);
+    }
+
+    /// Write what this session added to the history file.
+    fn save_history(&mut self) {
+        let Some(path) = self.opts.history_file else {
+            return;
+        };
+        // Marks in files on disk, by their full path.
+        for (&letter, place) in &self.marks {
+            let file = &self.doc.files[place.file];
+            let path = file
+                .path
+                .as_deref()
+                .filter(|_| file.url.is_none())
+                .and_then(|p| p.canonicalize().ok());
+            if let Some(path) = path {
+                self.session.marks.push(SavedMark {
+                    letter,
+                    path,
+                    source: place.source,
+                    rows_in: place.rows_in,
+                });
+            }
+        }
+        // Not being able to remember is no reason to fail.
+        let _ = History::save(path, &self.session);
     }
 
     fn content_height(&self) -> usize {
@@ -637,6 +717,7 @@ impl<'a> Pager<'a> {
                     cursor: self.cursor,
                 });
                 self.prompt_modifiers = PromptModifiers::default();
+                self.history_pos = None;
                 self.prompt = Some((PromptKind::Search { backward }, String::new()));
             }
             Action::Command => self.prompt = Some((PromptKind::Command, String::new())),
@@ -700,9 +781,13 @@ impl<'a> Pager<'a> {
             }
             Action::Edit => return Flow::Edit,
             Action::Save => self.prompt = Some((PromptKind::Save, String::new())),
-            Action::Pipe => self.prompt = Some((PromptKind::Pipe, String::new())),
+            Action::Pipe => {
+                self.history_pos = None;
+                self.prompt = Some((PromptKind::Pipe, String::new()));
+            }
             Action::Filter => {
                 self.prompt_modifiers = PromptModifiers::default();
+                self.history_pos = None;
                 self.prompt = Some((PromptKind::Filter, String::new()));
             }
             Action::NextHeading => self.next_heading(true),
@@ -789,6 +874,32 @@ impl<'a> Pager<'a> {
                 self.preview_search(kind, &input);
                 self.prompt = Some((kind, input));
             }
+            KeyCode::Up | KeyCode::Down => {
+                let kind_list = match kind {
+                    PromptKind::Search { .. } => Some(HistoryKind::Search),
+                    PromptKind::Filter => Some(HistoryKind::Filter),
+                    PromptKind::Pipe => Some(HistoryKind::Command),
+                    _ => None,
+                };
+                if let Some(list) = kind_list {
+                    let entries = self.remembered.list(list);
+                    // Up goes to older entries, Down back to newer ones and then
+                    // to an empty prompt.
+                    self.history_pos = match (key.code, self.history_pos) {
+                        (KeyCode::Up, None) => entries.len().checked_sub(1),
+                        (KeyCode::Up, Some(p)) => Some(p.saturating_sub(1)),
+                        (_, Some(p)) if p + 1 < entries.len() => Some(p + 1),
+                        _ => None,
+                    };
+                    input = self
+                        .history_pos
+                        .and_then(|p| entries.get(p))
+                        .cloned()
+                        .unwrap_or_default();
+                    self.preview_search(kind, &input);
+                }
+                self.prompt = Some((kind, input));
+            }
             KeyCode::Backspace => {
                 // Backspace on an empty prompt cancels it, as in less.
                 if input.pop().is_some() {
@@ -811,7 +922,10 @@ impl<'a> Pager<'a> {
                 }
                 PromptKind::Filter => self.set_filter(&input),
                 PromptKind::Save => self.save(&input),
-                PromptKind::Pipe if !input.trim().is_empty() => return Flow::Pipe(input),
+                PromptKind::Pipe if !input.trim().is_empty() => {
+                    self.remember(HistoryKind::Command, &input);
+                    return Flow::Pipe(input);
+                }
                 PromptKind::Pipe | PromptKind::Command | PromptKind::Mark { .. } => {}
             },
             KeyCode::Char(c) if !ctrl => match kind {
@@ -1199,7 +1313,23 @@ impl<'a> Pager<'a> {
                 self.go_to_place(place);
             }
             None if letter == '\'' => self.message = Some("No earlier place to go back to".into()),
-            None => self.message = Some(format!("No mark {letter}")),
+            None => match self.saved_marks.iter().position(|m| m.letter == letter) {
+                // A mark from an earlier session, in a file that is not open.
+                Some(index) => {
+                    let mark = self.saved_marks.remove(index);
+                    if let Some(file) = self.open_linked(&mark.path) {
+                        let place = Place {
+                            file,
+                            source: mark.source,
+                            rows_in: mark.rows_in,
+                        };
+                        self.marks.insert(letter, place);
+                        self.remember_place();
+                        self.go_to_place(place);
+                    }
+                }
+                None => self.message = Some(format!("No mark {letter}")),
+            },
         }
     }
 
@@ -1347,6 +1477,7 @@ impl<'a> Pager<'a> {
         let literal = std::mem::take(&mut self.prompt_modifiers).literal;
         match Search::with(input, false, literal) {
             Ok(filter) => {
+                self.remember(HistoryKind::Filter, input);
                 self.filter = Some(filter);
                 self.layout(anchor);
             }
@@ -1451,6 +1582,7 @@ impl<'a> Pager<'a> {
         };
         match Search::with(&pattern, backward, literal) {
             Ok(search) => {
+                self.remember(HistoryKind::Search, &pattern);
                 self.view.matches = search.row_matches(&self.view.wrapped);
                 self.search = Some(search);
                 self.cursor = None;
@@ -2152,6 +2284,7 @@ mod tests {
         fetch: None,
         start: None,
         keep_screen: false,
+        history_file: None,
     };
 
     static NO_KEYS: keys::Keymap = keys::Keymap::new();
@@ -3210,6 +3343,65 @@ mod tests {
 
     fn ctrl(p: &mut Pager, c: char) {
         p.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn history_is_remembered_between_sessions() {
+        let dir = std::env::temp_dir().join(format!("mmore-hist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let history = dir.join("history");
+        let (one, two) = (dir.join("one.txt"), dir.join("two.txt"));
+        std::fs::write(&one, numbered(50)).unwrap();
+        std::fs::write(&two, numbered(50)).unwrap();
+        let on_disk = |paths: &[&Path]| {
+            let mut d = doc(&[]);
+            for path in paths {
+                let mut file = read_plain(path).unwrap();
+                file.name = path.file_name().unwrap().to_string_lossy().into();
+                d.files.push(file);
+            }
+            d
+        };
+        let reload = read_plain;
+        let opts = Options {
+            history_file: Some(&history),
+            reload: Some(&reload),
+            ..OPTS
+        };
+
+        // The first session: searches, a filter, a command, and two marks.
+        let mut p = Pager::new(on_disk(&[&one, &two]), &opts, 40, 10);
+        press(&mut p, "/line 1\n/line 4\n&line\n&\n");
+        p.remembered.add(HistoryKind::Command, "wc -l");
+        p.session.add(HistoryKind::Command, "wc -l");
+        press(&mut p, "20gma:n30gmb");
+        p.save_history();
+
+        // The next session has only the first file open.
+        let mut p = Pager::new(on_disk(&[&one]), &opts, 40, 10);
+        press(&mut p, "/");
+        p.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert!(screen(&p).contains("/line 4"), "the newest search first");
+        p.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert!(screen(&p).contains("/line 1"));
+        p.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        p.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            p.prompt.as_ref().unwrap().1,
+            "",
+            "past the newest: empty again"
+        );
+        press(&mut p, "\x1b|");
+        p.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert!(screen(&p).contains("|wc -l"));
+        press(&mut p, "\x1b");
+        // A mark in the open file, and one in a file that opens for it.
+        press(&mut p, "'a");
+        assert_eq!((p.file, top_text(&p)), (0, "line 20".into()));
+        press(&mut p, "'b");
+        assert_eq!((p.file, top_text(&p)), (1, "line 30".into()));
+        assert_eq!(p.doc.files.len(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

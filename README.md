@@ -131,6 +131,13 @@ lines, and `s` keeps piped input that is gone otherwise. `s` does not overwrite 
 file that exists; `|` runs the command with the terminal, so its output shows
 until you press Enter.
 
+Searches, filters, `|` commands, and marks are remembered between sessions, as in
+`less`: Up and Down in a search, filter, or `|` prompt go through earlier ones,
+and `'` and a letter goes to a mark set in an earlier session (opening its file,
+if needed). They are kept in `~/.local/state/mmore/history` (or
+`$XDG_STATE_HOME/mmore/history`), readable only by you; set `MMORE_HISTORY` to
+another file, or to an empty value to remember nothing.
+
 A filter also applies to piped input as it arrives, so `tail -f app.log | mmore`
 followed by `&error` shows new errors only.
 

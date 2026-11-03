@@ -24,6 +24,10 @@ const ENVIRONMENT: &[(&str, &str)] = &[
     ),
     ("VISUAL, EDITOR", "The editor that v opens"),
     (
+        "MMORE_HISTORY",
+        "Where searches, filters, commands, and marks are remembered (empty for nowhere); by default $XDG_STATE_HOME/mmore/history or ~/.local/state/mmore/history",
+    ),
+    (
         "MMORE_CONFIG",
         "The config file (empty for none); by default $XDG_CONFIG_HOME/mmore/config or ~/.config/mmore/config",
     ),
@@ -36,6 +40,8 @@ const AFTER_HELP: &str = concat!(
     "  COLORFGBG    Terminal colors; a light background selects a light theme\n",
     "  VISUAL, EDITOR   The editor that v opens\n",
     "  MMORE_CONFIG Config file (empty for none; default ~/.config/mmore/config)\n",
+    "  MMORE_HISTORY  Searches, commands, and marks remembered (empty for none;\n",
+    "               default ~/.local/state/mmore/history)\n",
     "\n",
     "Config file: options as on the command line, one or more per line, and\n",
     "\"bind KEY ACTION\" lines (for example \"bind x quit\"); # starts a comment.\n",
@@ -101,6 +107,22 @@ pub fn config_path() -> Option<(PathBuf, bool)> {
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
     Some((base.join("mmore").join("config"), false))
+}
+
+/// Where searches, filters, commands, and marks are remembered: `MMORE_HISTORY`
+/// if set (empty for nowhere), otherwise `mmore/history` in `$XDG_STATE_HOME`
+/// or `~/.local/state` (where `less` keeps its history too).
+pub fn history_path() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("MMORE_HISTORY") {
+        return (!path.is_empty()).then(|| PathBuf::from(path));
+    }
+    let base = env::var_os("XDG_STATE_HOME")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("state"))
+        })?;
+    Some(base.join("mmore").join("history"))
 }
 
 /// Read the config file, if there is one.
