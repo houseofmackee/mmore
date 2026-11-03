@@ -6,6 +6,7 @@ mod compress;
 mod detect;
 mod document;
 mod pager;
+mod remote;
 mod render;
 mod source;
 mod stream;
@@ -158,6 +159,20 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
     let mut all_ok = true;
 
     for origin in origins {
+        // Web addresses are fetched (unless a file has that name).
+        if let Origin::File(path) = origin
+            && let Some(url) = path.to_str().filter(|s| remote::is_url(s))
+            && !path.exists()
+        {
+            match remote_file(cli, settings, url) {
+                Ok(file) => files.push(file),
+                Err(e) => {
+                    eprintln!("mmore: {url}: {e}");
+                    all_ok = false;
+                }
+            }
+            continue;
+        }
         // Compressed files are decompressed as they are read.
         if let Origin::File(path) = origin
             && let Some(format) = compress::format_of(path)
@@ -213,6 +228,7 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
             files.push(File {
                 name,
                 path: None,
+                url: None,
                 content: Section::Plain,
                 raw: message,
                 stream: None,
@@ -239,6 +255,25 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
         line_numbers: cli.line_numbers,
     };
     (document, all_ok)
+}
+
+/// A document from the web, fetched whole. Its file name (`guide.md`) decides
+/// how it is shown; links in it are resolved against its address.
+fn remote_file(cli: &Cli, settings: &Settings, url: &str) -> Result<File, String> {
+    let target = remote::Target::of(url);
+    let bytes = remote::fetch(&target)?;
+    if source::looks_binary(&bytes) && !cli.force {
+        return Err("not a text file (use --force to show it anyway)".into());
+    }
+    let naming = Naming {
+        name: url.to_string(),
+        detect: Origin::File(target.detect.clone()),
+        path: None,
+    };
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let mut file = text_file(cli, &naming, text, settings);
+    file.url = Some(target.base);
+    Ok(file)
 }
 
 /// What an input is called, what name decides how it is shown, and where it can
@@ -290,6 +325,7 @@ fn text_file(cli: &Cli, naming: &Naming, text: String, settings: &Settings) -> F
     File {
         name: naming.name.clone(),
         path: naming.path.clone(),
+        url: None,
         raw,
         content,
         stream: None,
@@ -355,6 +391,7 @@ fn stream_input(
     File {
         name,
         path: naming.path.clone(),
+        url: None,
         content: Section::Plain,
         raw: Vec::new(),
         stream: Some(stream),
@@ -436,6 +473,7 @@ fn output(cli: &Cli, settings: &Settings, document: Document, view: View) -> io:
         }
         Some(text_file(cli, &naming, source.text(), settings))
     };
+    let fetch = |url: &str| remote_file(cli, settings, url);
     pager::run(
         document,
         &pager::Options {
@@ -446,6 +484,7 @@ fn output(cli: &Cli, settings: &Settings, document: Document, view: View) -> io:
             chop: cli.chop_long_lines,
             watch: cli.watch,
             reload: Some(&reload),
+            fetch: Some(&fetch),
             keymap: &keymap,
         },
     )

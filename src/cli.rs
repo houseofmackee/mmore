@@ -170,7 +170,8 @@ pub fn split_words(s: &str) -> Vec<String> {
     after_help = AFTER_HELP
 )]
 pub struct Cli {
-    /// Files to display. Use `-` for stdin. Reads stdin when no files are given.
+    /// Files to display: names, web addresses (http or https), or `-` for stdin.
+    /// Reads stdin when no files are given.
     #[arg(value_name = "FILE")]
     pub files: Vec<PathBuf>,
 

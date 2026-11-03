@@ -37,6 +37,8 @@ use viewport::Viewport;
 
 /// Loads a file again after it was edited (see `v`).
 pub type Reload<'a> = &'a dyn Fn(&Path) -> Option<File>;
+/// How to fetch a document from the web (for links in one, and `R`).
+pub type Fetch<'a> = &'a dyn Fn(&str) -> Result<File, String>;
 
 pub struct Options<'a> {
     /// Quit when moving forward past the end of the last file (classic `more`).
@@ -54,6 +56,8 @@ pub struct Options<'a> {
     pub reload: Option<Reload<'a>>,
     /// Key bindings from the config file.
     pub keymap: &'a keys::Keymap,
+    /// How to fetch web documents.
+    pub fetch: Option<Fetch<'a>>,
 }
 
 /// Page the document interactively until the user quits.
@@ -572,15 +576,11 @@ impl<'a> Pager<'a> {
             Action::GoToMark => {
                 self.prompt = Some((PromptKind::Mark { set: false }, String::new()))
             }
+            // reload says why when a file cannot be reloaded.
             Action::Reload => {
-                let file = &self.doc.files[self.file];
-                if file.path.is_some() && file.stream.is_none() {
-                    self.reload();
-                    if self.message.is_none() {
-                        self.message = Some(format!("Reloaded {}", self.doc.files[self.file].name));
-                    }
-                } else {
-                    self.message = Some(format!("{} cannot be reloaded", file.name));
+                self.reload();
+                if self.message.is_none() {
+                    self.message = Some(format!("Reloaded {}", self.doc.files[self.file].name));
                 }
             }
             Action::None | Action::Digit(_) | Action::Percent => {}
@@ -836,8 +836,14 @@ impl<'a> Pager<'a> {
         let Some(url) = self.view.wrapped.links.get(link as usize).cloned() else {
             return;
         };
+        let remote = self.doc.files[self.file].url.is_some();
         if let Some(path) = url.strip_prefix("file://") {
-            self.follow_local(path);
+            // A page from the web does not get to open files on this machine.
+            if remote {
+                self.message = Some(format!("Cannot open {url} from a web page"));
+            } else {
+                self.follow_local(path);
+            }
         } else if is_absolute_url(&url) {
             open_in_browser(&url, &mut self.message);
         } else {
@@ -850,9 +856,18 @@ impl<'a> Pager<'a> {
             Some((path, fragment)) => (path, Some(fragment)),
             None => (target, None),
         };
-        let path = percent_decode(path);
         let from = self.place();
-        if !path.is_empty() {
+        // In a document from the web, the link is an address relative to it.
+        if let Some(base) = self.doc.files[self.file].url.clone()
+            && !path.is_empty()
+        {
+            let Some(file) = self.open_remote(&crate::remote::join(&base, path)) else {
+                return;
+            };
+            self.switch_file(file);
+        }
+        let path = percent_decode(path);
+        if !path.is_empty() && self.doc.files[self.file].url.is_none() {
             let base = self.doc.files[self.file]
                 .path
                 .as_deref()
@@ -880,6 +895,32 @@ impl<'a> Pager<'a> {
         }
         self.history.push(from);
         self.last_place = Some(from);
+    }
+
+    /// The index of the document at web address `url`, fetching it if it is not
+    /// open yet.
+    fn open_remote(&mut self, url: &str) -> Option<usize> {
+        if let Some(open) = self.doc.files.iter().position(|f| f.name == url) {
+            return Some(open);
+        }
+        let Some(fetch) = self.opts.fetch else {
+            self.message = Some(format!("Cannot fetch {url}"));
+            return None;
+        };
+        match fetch(url) {
+            Ok(file) => {
+                self.doc.files.push(file);
+                let index = self.doc.files.len() - 1;
+                self.doc.start_highlighting_file(index);
+                self.positions.push(0);
+                self.stamps.push(None);
+                Some(index)
+            }
+            Err(e) => {
+                self.message = Some(format!("Cannot open {url}: {e}"));
+                None
+            }
+        }
     }
 
     /// The index of the file at `path`, loading it if it is not open yet.
@@ -1112,10 +1153,21 @@ impl<'a> Pager<'a> {
     /// Load the current file again (after editing, `R`, or `--watch`), keeping the
     /// place; at the end it stays at the end, so a growing log keeps showing it.
     fn reload(&mut self) {
+        let file = &self.doc.files[self.file];
+        // A document from the web is fetched again.
+        if file.url.is_some() {
+            let name = file.name.clone();
+            match self.opts.fetch.map(|fetch| fetch(&name)) {
+                Some(Ok(file)) => self.replace_file(file),
+                Some(Err(e)) => self.message = Some(format!("Could not fetch {name} again: {e}")),
+                None => {}
+            }
+            return;
+        }
         let Some(reload) = self.opts.reload else {
             return;
         };
-        let Some(path) = self.doc.files[self.file].path.clone() else {
+        let Some(path) = file.path.clone() else {
             self.message = Some("Piped input cannot be reloaded".into());
             return;
         };
@@ -1126,19 +1178,23 @@ impl<'a> Pager<'a> {
         }
         self.stamps[self.file] = stamp(&path);
         match reload(&path) {
-            Some(file) => {
-                let at_end = self.view.vp.at_end() && self.view.vp.top > 0;
-                self.doc.files[self.file] = file;
-                self.doc.start_highlighting_file(self.file);
-                let anchor = self.view.anchor();
-                self.layout(anchor);
-                if at_end {
-                    self.view.vp.top = self.view.vp.max_top();
-                }
-            }
+            Some(file) => self.replace_file(file),
             None => {
                 self.message = Some(format!("Could not read {} again", path.display()));
             }
+        }
+    }
+
+    /// Show `file` instead of the current one, keeping the place (or staying at
+    /// the end).
+    fn replace_file(&mut self, file: File) {
+        let at_end = self.view.vp.at_end() && self.view.vp.top > 0;
+        self.doc.files[self.file] = file;
+        self.doc.start_highlighting_file(self.file);
+        let anchor = self.view.anchor();
+        self.layout(anchor);
+        if at_end {
+            self.view.vp.top = self.view.vp.max_top();
         }
     }
 
@@ -1738,6 +1794,7 @@ mod tests {
                 .map(|(name, text)| File {
                     name: name.to_string(),
                     path: None,
+                    url: None,
                     content: if name.ends_with(".md") {
                         Section::Markdown(text.to_string())
                     } else {
@@ -1766,6 +1823,7 @@ mod tests {
         watch: false,
         reload: None,
         keymap: &NO_KEYS,
+        fetch: None,
     };
 
     static NO_KEYS: keys::Keymap = keys::Keymap::new();
@@ -2058,6 +2116,7 @@ mod tests {
         d.files.push(File {
             name: "a.rs".into(),
             path: None,
+            url: None,
             content: Section::Code(Arc::clone(&lazy)),
             raw: plain::render(text),
             stream: None,
@@ -2117,6 +2176,7 @@ mod tests {
         d.files.push(File {
             name: "(standard input)".into(),
             path: None,
+            url: None,
             content: Section::Plain,
             raw: Vec::new(),
             stream: Some(stream),
@@ -2383,6 +2443,7 @@ mod tests {
         d.files.push(File {
             name: "a.rs".into(),
             path: None,
+            url: None,
             content: Section::Code(Arc::clone(&lazy)),
             raw: plain::render(text),
             stream: None,
@@ -2406,6 +2467,7 @@ mod tests {
             Some(File {
                 name: "a.txt".into(),
                 path: Some("a.txt".into()),
+                url: None,
                 content: Section::Plain,
                 raw: plain::render("edited 1\nedited 2\n"),
                 stream: None,
@@ -2510,6 +2572,7 @@ mod tests {
         Some(File {
             name: path.display().to_string(),
             path: Some(path.to_path_buf()),
+            url: None,
             content: Section::Plain,
             raw: plain::render(&text),
             stream: None,
@@ -2534,6 +2597,7 @@ mod tests {
         Some(File {
             name: path.display().to_string(),
             path: Some(path.to_path_buf()),
+            url: None,
             content: Section::Markdown(text.clone()),
             raw: plain::render(&text),
             stream: None,
@@ -2622,6 +2686,39 @@ mod tests {
         press(&mut p, "\n");
         assert_eq!(p.view.vp.top, top + 1);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn links_in_web_documents_are_fetched_relative_to_them() {
+        let text = "[next](b.md)\n\n[local](file:///etc/hosts)\n";
+        let mut d = doc(&[("https://h.io/docs/a.md", text)]);
+        d.files[0].url = Some("https://h.io/docs/a.md".into());
+        let fetched = std::cell::RefCell::new(Vec::new());
+        let fetch = |url: &str| -> Result<File, String> {
+            fetched.borrow_mut().push(url.to_string());
+            let mut file = doc(&[(url, "# Fetched\n")]).files.remove(0);
+            file.url = Some(url.to_string());
+            Ok(file)
+        };
+        let opts = Options {
+            fetch: Some(&fetch),
+            ..OPTS
+        };
+        let mut p = Pager::new(d, &opts, 40, 10);
+        press(&mut p, "\t\n");
+        assert_eq!(p.doc.files[p.file].name, "https://h.io/docs/b.md");
+        press(&mut p, "\x08\t\n");
+        assert_eq!(
+            *fetched.borrow(),
+            vec!["https://h.io/docs/b.md"],
+            "fetched once"
+        );
+        press(&mut p, "\x08\t\t\n");
+        assert_eq!(p.file, 0);
+        assert_eq!(
+            p.message.as_deref(),
+            Some("Cannot open file:///etc/hosts from a web page")
+        );
     }
 
     #[test]

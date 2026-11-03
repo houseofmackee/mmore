@@ -147,6 +147,9 @@ pub struct File {
     pub name: String,
     /// Where it came from on disk, if it can be opened in an editor.
     pub path: Option<std::path::PathBuf>,
+    /// The web address it came from: relative links are resolved against it,
+    /// and `R` fetches it again.
+    pub url: Option<String>,
     pub content: Section,
     /// The source as plain lines (tabs expanded, control characters escaped).
     /// Empty for streamed input, whose lines are in `stream`.
@@ -397,6 +400,7 @@ mod tests {
         File {
             name: name.into(),
             path: None,
+            url: None,
             content,
             raw: plain::render(raw),
             stream: None,

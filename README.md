@@ -11,6 +11,7 @@ mmore README.md          # rendered Markdown
 mmore src/main.rs        # highlighted code
 git log | mmore          # paging piped input
 mmore -n a.txt b.txt     # several files, with line numbers
+mmore https://github.com/houseofmackee/mmore   # a repository's README
 ```
 
 ## Install
@@ -250,6 +251,29 @@ lines in view. The same goes for pipes given as file names, such as named pipes
 plain text, unless its first line names a language (`#!/usr/bin/env python3`),
 in which case `mmore` waits for the end and highlights it. Line numbers (`-n`)
 for piped input always leave room for five digits, since its length is unknown.
+
+## Documents on the web
+
+A web address (`http://` or `https://`) is fetched and shown like a file, using
+the `curl` command:
+
+```sh
+mmore https://example.com/docs/guide.md
+mmore https://github.com/houseofmackee/mmore              # its README
+mmore https://github.com/houseofmackee/mmore/blob/main/CHANGELOG.md
+```
+
+What the document is comes from the end of its address (`guide.md` is rendered as
+Markdown). For GitHub, a repository's address shows its README, a `/tree/` address
+the README of that directory, and a `/blob/` address the file itself rather than
+the web page around it. Relative links in a fetched document lead to the
+documents next to it, so `Tab` and `Enter` (see
+[Following links](#following-links)) work through a repository's documentation;
+`R` fetches the document again. A fetched page cannot open `file://` links on your
+machine.
+
+Fetching gives up after 30 seconds, and documents over 100 MB are refused. A
+name that exists as a file is always read as that file.
 
 ## Compressed files
 

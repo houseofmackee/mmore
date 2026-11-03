@@ -79,6 +79,8 @@ def finish(pid, fd, out=b""):
                 pass
         done, status = os.waitpid(pid, os.WNOHANG)
         if done:
+            # Give the terminal back: the system has a few hundred in all.
+            os.close(fd)
             return (None if killed else os.waitstatus_to_exitcode(status)), out
         if time.time() > deadline and not killed:
             # Killed, it still has to exit, so keep reading until it has.
@@ -490,6 +492,43 @@ def config_keys(tmp, n100):
     check("a key bound in the config file works", code == 0 and ALT_OFF in after(snaps, 3))
 
 
+def remote_documents(tmp):
+    """Documents from a local web server: rendered, links followed, R fetches again."""
+    import functools
+    import http.server
+    import threading
+
+    site = os.path.join(tmp, "site")
+    os.makedirs(os.path.join(site, "docs"))
+    with open(os.path.join(site, "docs", "guide.md"), "w") as f:
+        f.write("# Remote guide\n\nRead [the next part](next.md#details).\n\n" + "More text.\n\n" * 10)
+    with open(os.path.join(site, "docs", "next.md"), "w") as f:
+        f.write("# Next part\n\n" + "Filler.\n\n" * 10 + "## Details\n\nThe details.\n\n" + "End.\n\n" * 10)
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=site)
+    handler.log_message = lambda *args: None
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/docs"
+    try:
+        def edit_next():
+            with open(os.path.join(site, "docs", "next.md"), "a") as f:
+                f.write("Added later.\n")
+
+        keys = ["\t", "\r", ("SHOWN", "Details"), "\x7f", "\t", "\r", edit_next, "G", "R", ("SHOWN", "Added later"), "q"]
+        out, code, snaps = run(f"{BIN} {url}/guide.md", keys, rows=8, cols=60)
+        first = snaps[0].decode(errors="replace")
+        check("a web document is fetched and rendered", "Remote guide" in first and "# Remote" not in first)
+        followed = after(snaps, 1)
+        check("a relative link in it is fetched from the same site", "Details" in followed.split("\x1b[2;1H")[0] and "next.md" in followed)
+        check("Backspace goes back to the first document", "[1/2]" in after(snaps, 3))
+        refetched = after(snaps, 8) + after(snaps, 9)
+        check("R fetches a web document again", "Added later" in refetched and code == 0)
+        out, code, _ = run(f"{BIN} {url}/missing.md", [], frame=False)
+        check("a missing web document is reported", "404" in out and code == 1)
+    finally:
+        server.shutdown()
+
+
 def less_keys(tmp, n100):
     # A count before g, %, and j: go to a line, a percentage, or move N lines.
     out, code, snaps = run(f"{BIN} {n100}", ["4", "2", "g", "5", "0", "%", "q"], rows=10, cols=40)
@@ -632,6 +671,9 @@ def reading_documents(tmp):
     out, code, snaps = run(f"{BIN} --watch --always-page {zlog}.gz", [change_gz, ("SHOWN", "second version"), "v", "q"], rows=10, cols=200)
     check("--watch reloads a compressed file", "second version" in snaps[2][len(snaps[0]):].decode(errors="replace"))
     check("v explains that compressed files cannot be edited", "is compressed" in after(snaps, 2) and code == 0)
+    write_gz("third version\n")
+    out, code, snaps = run(f"{BIN} --always-page {zlog}.gz", [lambda: write_gz("fourth version\n"), "R", "q"], rows=10, cols=200)
+    check("R reloads a compressed file", "fourth version" in after(snaps, 1) and "Reloaded" in after(snaps, 1))
 
 
 def input_colors(tmp):
@@ -759,6 +801,7 @@ def main():
         mouse(n100)
         less_keys(tmp, n100)
         config_keys(tmp, n100)
+        remote_documents(tmp)
         reading_documents(tmp)
         input_colors(tmp)
         streaming()

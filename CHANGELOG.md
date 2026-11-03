@@ -10,6 +10,14 @@ section here, so a version can only be released once it has one.
 - A config file (`~/.config/mmore/config`, or the file in `MMORE_CONFIG`) for
   default options and key bindings, such as `bind x quit`. The help screen lists
   the bindings.
+- Documents on the web: `mmore https://...` fetches and shows a document, and a
+  GitHub repository's address shows its README. Relative links in it are
+  followed on the same site, and `R` fetches it again. It uses `curl`.
+
+### Fixed
+
+- `R` did nothing on compressed files that were being read as a stream (it
+  only worked with `--watch`).
 
 ## [0.5.0] - 2026-11-03
 
