@@ -5,6 +5,13 @@ section here, so a version can only be released once it has one.
 
 ## [Unreleased]
 
+### Fixed
+
+- Quitting while the mouse wheel still had momentum could leave `^[OB` on the
+  screen after the prompt: terminals that send the wheel as arrow keys to
+  full-screen programs kept sending them after mmore had handed the terminal
+  back. mmore now discards input that is still arriving before it does.
+
 ## [0.6.2] - 2026-11-03
 
 ### Fixed

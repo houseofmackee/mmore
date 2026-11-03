@@ -648,6 +648,43 @@ def startup_timing(tmp):
 
     size, _ = leave_and_measure(True)
     check("after a full-screen size switch, mmore waits for the size to come back", size == ["42 141"], str(size))
+    # Quitting while the mouse wheel still has momentum, in a terminal like
+    # Warp: it turns the wheel into arrow keys for full-screen programs, and it
+    # stays in that mode for a moment after the program leaves (until it gives
+    # back the earlier size). Keys echoed after mmore has handed the terminal
+    # back would show as ^[OB after the prompt.
+    pid, fd = spawn(f"{BIN} --always-page {MD}; echo DONE", clean_env(), 42, 141)
+    out = b""
+    start = time.time()
+    quit_at = left = None
+    switched = False
+    while time.time() - start < START_WAIT and b"DONE" not in out:
+        r, _, _ = select.select([fd], [], [], 0.005)
+        if r:
+            try:
+                out += os.read(fd, 65536)
+            except OSError:
+                break
+        if not switched and ALT_ON.encode() in out:
+            set_size(fd, 41, 144)
+            switched = True
+        if quit_at is None and b"--More--" in out:
+            os.write(fd, b"\x1bOB" * 3 + b"q")
+            quit_at = time.time()
+        if left is None and quit_at and ALT_OFF.encode() in out:
+            left = time.time()
+        if quit_at and (left is None or time.time() - left < 0.06):
+            try:
+                os.write(fd, b"\x1bOB")
+            except OSError:
+                pass
+        elif switched and left:
+            set_size(fd, 42, 141)
+            switched = False
+    code, out = finish(pid, fd, out)
+    after_exit = out.decode(errors="replace").rsplit(ALT_OFF, 1)[-1]
+    check("wheel momentum after quitting is not echoed", "^[" not in after_exit and "OB" not in after_exit, repr(after_exit[:40]))
+
     size, took = leave_and_measure(False)
     check("without a size switch, mmore exits without waiting", size == ["42 141"] and took is not None and took < 0.25, f"{size} {took}")
 

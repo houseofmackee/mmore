@@ -94,9 +94,36 @@ fn restore() {
     // before the alternate screen, which is there already; one that does not
     // would leave it mid-line, and zsh would then show its `%` marker.
     let _ = out.write_all(b"\r");
-    let _ = terminal::disable_raw_mode();
     let _ = out.flush();
+    // Still in raw mode, so nothing typed now is echoed onto the screen.
     wait_for_size_back();
+    discard_late_input();
+    let _ = terminal::disable_raw_mode();
+}
+
+/// How long input must be quiet before the terminal is handed back.
+const INPUT_QUIET: Duration = Duration::from_millis(30);
+/// Longest to keep discarding input that is still arriving.
+const INPUT_DRAIN_MAX: Duration = Duration::from_millis(300);
+
+/// Drop input that is still arriving: the mouse wheel's momentum, which many
+/// terminals send as arrow keys to full-screen programs, keeps coming after
+/// quitting. Echoed once raw mode is off, it would show up as `^[OB` after the
+/// prompt.
+fn discard_late_input() {
+    let deadline = Instant::now() + INPUT_DRAIN_MAX;
+    while Instant::now() < deadline && crossterm::event::poll(INPUT_QUIET).unwrap_or(false) {
+        let _ = crossterm::event::read();
+    }
+    // Whatever is left (a partial key) must not reach the shell either.
+    #[cfg(unix)]
+    if let Ok(tty) = std::fs::File::open("/dev/tty") {
+        use std::os::fd::AsRawFd;
+        // SAFETY: tcflush on an open terminal descriptor; no memory involved.
+        unsafe {
+            libc::tcflush(tty.as_raw_fd(), libc::TCIFLUSH);
+        }
+    }
 }
 
 /// Some terminals (Warp) give full-screen programs a different size and switch
