@@ -2166,12 +2166,13 @@ mod tests {
         d.line_numbers = true;
         let p = Pager::new(d, &OPTS, 20, 10);
         let rows: Vec<String> = p.view.wrapped.rows.iter().map(Line::text).collect();
-        // Content wraps at the width minus the 4-column gutter.
-        assert_eq!(rows[1], "this line is lon");
+        // Content wraps (between words) at the width minus the 4-column gutter.
+        assert_eq!(rows[1..], ["this line is ", "long enough to ", "wrap"]);
         let s = plain_screen(&p);
         assert!(s.contains("  1 short"));
-        assert!(s.contains("  2 this line is lon"));
-        assert!(s.contains("    g enough to wrap"));
+        assert!(s.contains("  2 this line is"));
+        assert!(s.contains("    long enough to"));
+        assert!(s.contains("    wrap"));
     }
 
     #[test]
@@ -2213,9 +2214,15 @@ mod tests {
         assert!(!p.highlighting());
         let s = screen(&p);
         assert!(s.contains("38;2;"));
-        // The wrapped second line keeps its text across rows.
-        assert!(plain_screen(&p).contains("    let wrapped_long"));
-        assert!(plain_screen(&p).contains("_identifier_name = 1"));
+        // The wrapped second line keeps its text across rows, highlighted or not:
+        // between words, and inside a word longer than a row.
+        let rows: Vec<String> = p.view.wrapped.rows.iter().map(Line::text).collect();
+        assert_eq!(
+            rows[1..4],
+            ["    let ", "wrapped_long_identif", "ier_name = 1;"]
+        );
+        let s = plain_screen(&p);
+        assert!(s.contains("wrapped_long_identif") && s.contains("ier_name = 1;"));
         // The raw view shows no highlighting.
         let mut p = p;
         press(&mut p, "r");

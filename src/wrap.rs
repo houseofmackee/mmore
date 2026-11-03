@@ -1,5 +1,5 @@
-//! Width-aware wrapping of styled lines: hard wrapping for display, and word
-//! wrapping for Markdown prose.
+//! Width-aware wrapping of styled lines: wrapping long lines for display (at
+//! spaces where possible), and word wrapping for Markdown prose.
 
 use unicode_width::UnicodeWidthChar;
 
@@ -98,28 +98,50 @@ pub fn row_count(lines: &[Line], width: usize) -> usize {
 }
 
 /// Split one line into rows no wider than `width` columns, keeping span styles.
-/// Always returns at least one row. A double-width character never straddles rows.
+/// Rows end after the last space that fits, so words stay whole; a word longer
+/// than a row is split. Every character is kept (the spaces stay at the ends of
+/// rows), so the rows put together are the line. Always returns at least one
+/// row. A double-width character never straddles rows.
 pub fn wrap_line(line: &Line, width: usize) -> Vec<Line> {
     let width = width.max(1);
     if line.width() <= width {
         return vec![line.clone()];
     }
+    let cells: Vec<(char, Style, usize)> = line
+        .spans
+        .iter()
+        .flat_map(|span| {
+            span.text
+                .chars()
+                .map(move |c| (c, span.style, c.width().unwrap_or(0)))
+        })
+        .collect();
     let mut rows = Vec::new();
-    let mut current = Line::default();
-    let mut current_width = 0;
-    let mut buf = [0u8; 4];
-    for span in &line.spans {
-        for ch in span.text.chars() {
-            let w = ch.width().unwrap_or(0);
-            if current_width + w > width && current_width > 0 {
-                rows.push(std::mem::take(&mut current));
-                current_width = 0;
-            }
-            current.push(ch.encode_utf8(&mut buf), span.style);
-            current_width += w;
+    let mut start = 0;
+    while start < cells.len() {
+        // As many characters as fit (at least one).
+        let mut end = start;
+        let mut used = 0;
+        while end < cells.len() && (used + cells[end].2 <= width || end == start) {
+            used += cells[end].2;
+            end += 1;
         }
+        // Break after the last space, unless the rest fits or the next
+        // character is a space anyway.
+        if end < cells.len()
+            && cells[end].0 != ' '
+            && let Some(space) = (start..end).rev().find(|&i| cells[i].0 == ' ')
+        {
+            end = space + 1;
+        }
+        let mut row = Line::default();
+        let mut buf = [0u8; 4];
+        for &(c, style, _) in &cells[start..end] {
+            row.push(c.encode_utf8(&mut buf), style);
+        }
+        rows.push(row);
+        start = end;
     }
-    rows.push(current);
     rows
 }
 
@@ -295,6 +317,42 @@ mod tests {
         assert_eq!(texts(&rows), vec!["abc", "de"]);
         assert_eq!(rows[0].spans[1], Span::new("c", bold));
         assert_eq!(rows[1].spans, vec![Span::new("de", bold)]);
+    }
+
+    #[test]
+    fn long_lines_break_between_words() {
+        let rows = |text: &str, width| -> Vec<String> {
+            wrap_line(&Line::plain(text), width)
+                .iter()
+                .map(Line::text)
+                .collect()
+        };
+        assert_eq!(
+            rows("one two three four", 9),
+            ["one two ", "three ", "four"]
+        );
+        // A space right at the edge starts the next row; nothing is lost.
+        assert_eq!(rows("abcd efgh", 4), ["abcd", " ", "efgh"]);
+        // Words longer than a row are split.
+        assert_eq!(
+            rows("supercalifragilistic is long", 8),
+            ["supercal", "ifragili", "stic is ", "long"]
+        );
+        // Wide characters never straddle rows, and styles are kept.
+        assert_eq!(rows("日本語 テキスト", 7), ["日本語 ", "テキス", "ト"]);
+        let bold = Style {
+            bold: true,
+            ..Style::default()
+        };
+        let line = Line {
+            spans: vec![
+                Span::new("plain ", Style::default()),
+                Span::new("bold words", bold),
+            ],
+        };
+        let wrapped = wrap_line(&line, 8);
+        assert_eq!(wrapped[0].text(), "plain ");
+        assert_eq!(wrapped[1].spans, vec![Span::new("bold ", bold)]);
     }
 
     #[test]

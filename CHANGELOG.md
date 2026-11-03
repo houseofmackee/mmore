@@ -10,6 +10,11 @@ section here, so a version can only be released once it has one.
 - `--tabs N` (or `-x N`, as in `less`) sets the distance between tab stops.
 - The README explains how to use mmore as git's pager.
 
+### Changed
+
+- Long lines of plain text and code wrap between words (as Markdown always
+  did) instead of anywhere; a word longer than the screen is still split.
+
 ### Fixed
 
 - Marks, `''`, and Backspace after following a link go back to the exact row,
