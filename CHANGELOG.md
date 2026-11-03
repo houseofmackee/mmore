@@ -10,6 +10,9 @@ section here, so a version can only be released once it has one.
 - Shell completions (`mmore --completions zsh`, and bash, fish, elvish, and
   PowerShell) and a manual page (`mmore --man`), which the Homebrew formula
   installs.
+- With `--mouse`, clicking a link follows it.
+- Links can be followed in the raw source view (`r`) too, and `]`, `[`, and `t`
+  work there.
 
 ### Changed
 

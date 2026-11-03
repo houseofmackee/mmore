@@ -576,6 +576,12 @@ def reading_documents(tmp):
     followed = after(snaps, 1)
     check("Enter follows the link to the heading", "Part 3" in followed.split("\x1b[2;1H")[0] and "[2/2]" in followed)
     check("Backspace goes back to the link", "Index" in after(snaps, 2) and "[1/2]" in after(snaps, 2))
+    # With --mouse, clicking the link follows it. The screen starts with the
+    # heading, its rule, and a blank line, so "See part 3" is on row 4; the
+    # click (button 1 pressed, SGR encoding) is at column 6, on "part".
+    out, code, snaps = run(f"{BIN} --mouse {index}", ["\x1b[<0;6;4M", "q"], rows=8, cols=40)
+    clicked = after(snaps, 0)
+    check("clicking a link follows it", "Part 3" in clicked.split("\x1b[2;1H")[0] and "[2/2]" in clicked)
 
     # A search with no more matches in this file goes on to the next file.
     first, second = os.path.join(tmp, "first.txt"), os.path.join(tmp, "second.txt")

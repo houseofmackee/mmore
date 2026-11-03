@@ -90,6 +90,7 @@ mmore --man > ~/.local/share/man/man1/mmore.1
 | `w` | Wrap long lines, or cut them off at the screen edge |
 | `Left` / `Right` | Scroll sideways when long lines are cut off |
 | Mouse wheel | Scroll 3 lines (with `--mouse`) |
+| Click a link | Follow it (with `--mouse`) |
 | `F` | Follow new input at the end, as with `tail -f` (any key stops) |
 | `/pattern`, `?pattern` | Search forward / backward |
 | `&pattern` | Show only lines that match (`&` and Enter shows all again) |
@@ -137,7 +138,7 @@ followed by `&error` shows new errors only.
 | `-e`, `--exit-at-eof` | Quit when paging past the end, like classic `more` |
 | `--watch` | Reload the file whenever it changes on disk |
 | `--no-pager`, `--always-page` | Never page, or page even short input |
-| `--mouse` | Scroll with the mouse wheel (see below) |
+| `--mouse` | Scroll with the mouse wheel and click links (see below) |
 | `--show-escapes` | Show escape codes in plain text (`^[[31m`) instead of their colors |
 | `--force` | Show binary files anyway |
 
@@ -154,9 +155,10 @@ mmore notes.md                    # line numbers, Solarized
 mmore --theme InspiredGitHub x.rs # line numbers, InspiredGitHub
 ```
 
-### Mouse wheel
+### Mouse
 
-With `--mouse`, the wheel scrolls three lines at a time. The terminal then sends
+With `--mouse`, the wheel scrolls three lines at a time, and clicking a link
+follows it (see [Following links](#following-links)). The terminal then sends
 mouse clicks to `mmore` instead of selecting text, so it is off by default. To
 select text while it is on, drag while holding Shift in most terminals (Option in
 iTerm2). To turn it on for good, add it to `MMORE_OPTS`.
@@ -202,6 +204,11 @@ video, with its target in the status line) and `Shift-Tab` the previous one;
 
 `Backspace` goes back to where you were when you followed the link, one link at a
 time. Any other key leaves the selection, so `Enter` scrolls as usual again.
+With `--mouse`, clicking a link follows it right away.
+
+Links can also be followed in the raw source view (`r`), where the whole link as
+written (`[text](url)`) is the link; `]`, `[`, and `t` find the headings there
+too.
 
 ## Piped input
 

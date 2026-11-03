@@ -207,8 +207,10 @@ impl Document {
                 };
                 markdown::render(text, &opts)
             }
+            // The source as written, with its links and headings kept.
+            Section::Markdown(text) => markdown::source(text),
             // Code starts plain; the pager shows highlighted lines as they arrive.
-            Section::Markdown(_) | Section::Plain | Section::Code(_) => fixed(&file.raw),
+            Section::Plain | Section::Code(_) => fixed(&file.raw),
         }
     }
 

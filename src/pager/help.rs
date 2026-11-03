@@ -20,6 +20,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("w", "Turn wrapping of long lines off or on"),
     ("Left  Right", "Scroll sideways when lines are not wrapped"),
     ("Mouse wheel", "Scroll 3 lines (needs --mouse)"),
+    ("Click a link", "Follow it (needs --mouse)"),
     ("F", "Follow new input at the end (any key stops)"),
     (
         "/pattern",

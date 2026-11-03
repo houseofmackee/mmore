@@ -35,16 +35,91 @@ pub struct MdOptions<'a> {
     pub front_matter: bool,
 }
 
+const OPTIONS: Options = Options::ENABLE_STRIKETHROUGH
+    .union(Options::ENABLE_TABLES)
+    .union(Options::ENABLE_TASKLISTS)
+    .union(Options::ENABLE_FOOTNOTES)
+    .union(Options::ENABLE_GFM)
+    .union(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS)
+    .union(Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS);
+
+/// The URL a link goes to. Email autolinks (<a@b.c>) come without their scheme.
+fn link_url(link_type: LinkType, dest_url: &str) -> String {
+    if link_type == LinkType::Email {
+        format!("mailto:{dest_url}")
+    } else {
+        dest_url.to_string()
+    }
+}
+
+/// The source as written, line for line (for the raw view), with each link's
+/// whole source text (`[text](url)`) carrying its link, and the headings, so
+/// links can be followed and headings found there too.
+pub fn source(text: &str) -> Rendered {
+    let mut links: Vec<Range<usize>> = Vec::new();
+    let mut out = Rendered::default();
+    let mut heading: Option<(u8, usize, String)> = None;
+    let line_of = |offset: usize| text[..offset].matches('\n').count();
+    for (event, range) in Parser::new_ext(text, OPTIONS).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                ..
+            }) if !dest_url.is_empty() => {
+                links.push(range);
+                out.links.push(link_url(link_type, &dest_url));
+            }
+            Event::Start(Tag::Heading { level, .. }) => {
+                heading = Some((level as u8, line_of(range.start), String::new()));
+            }
+            Event::Text(t) | Event::Code(t) => {
+                if let Some((_, _, s)) = &mut heading {
+                    s.push_str(&t);
+                }
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if let Some((level, source, text)) = heading.take() {
+                    let text = text.trim().to_string();
+                    out.headings.push(Heading {
+                        level,
+                        text,
+                        source,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut start = 0;
+    for (i, raw) in text.split_inclusive('\n').enumerate() {
+        let content = raw.trim_end_matches(['\n', '\r']);
+        let end = start + content.len();
+        let mut line = Line::default();
+        let mut at = start;
+        for (index, link) in links.iter().enumerate() {
+            let (from, to) = (link.start.max(at), link.end.min(end));
+            if from >= to {
+                continue;
+            }
+            line.push(&text[at..from], Style::default());
+            let style = Style {
+                link: Some(index as u32),
+                ..Style::default()
+            };
+            line.push(&text[from..to], style);
+            at = to;
+        }
+        line.push(&text[at..end], Style::default());
+        out.push(plain::sanitize(&line), i);
+        start += raw.len();
+    }
+    out
+}
+
 pub fn render(text: &str, opts: &MdOptions) -> Rendered {
-    let options = Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TABLES
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_FOOTNOTES
-        | Options::ENABLE_GFM
-        | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
-        | Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS;
     let events: Vec<(Event, Range<usize>)> =
-        Parser::new_ext(text, options).into_offset_iter().collect();
+        Parser::new_ext(text, OPTIONS).into_offset_iter().collect();
     let mut r = Renderer::new(text, opts);
     for i in 0..events.len() {
         r.handle(&events, i);
@@ -141,7 +216,7 @@ struct Renderer<'a> {
     strike: usize,
     image: usize,
     heading: Option<HeadingLevel>,
-    /// Open links: destination, link table index (absolute URLs only), and the
+    /// Open links: destination, link table index, and the
     /// position in `inline` where the link text starts.
     links: Vec<(String, Option<u32>, usize)>,
     /// Open images: destination URL.
@@ -355,12 +430,7 @@ impl<'a> Renderer<'a> {
                 dest_url,
                 ..
             } => {
-                // Email autolinks (<a@b.c>) come without their scheme.
-                let url = if *link_type == LinkType::Email {
-                    format!("mailto:{dest_url}")
-                } else {
-                    dest_url.to_string()
-                };
+                let url = link_url(*link_type, dest_url);
                 let index = self.register_link(&url);
                 self.links.push((url, index, self.inline.len()));
             }
@@ -812,6 +882,34 @@ mod tests {
         assert_eq!(
             marked("*a* **b** ~~c~~ `d`", 40),
             "{i}a{/} {b}b{/} {s}c{/} {fg1}d{/}"
+        );
+    }
+
+    #[test]
+    fn source_keeps_the_text_and_marks_links() {
+        let text = "# Title\n\nSee [a](x.md) and\n[b\nc](https://b.io) <me@x.io>.\n\tTabbed\r\n";
+        let r = source(text);
+        let lines: Vec<String> = r.lines.iter().map(markup).collect();
+        assert_eq!(
+            lines,
+            vec![
+                "# Title",
+                "",
+                "See {link0}[a](x.md){/} and",
+                "{link1}[b{/}",
+                "{link1}c](https://b.io){/} {link2}<me@x.io>{/}.",
+                "        Tabbed",
+            ]
+        );
+        assert_eq!(r.links, vec!["x.md", "https://b.io", "mailto:me@x.io"]);
+        assert_eq!(r.source, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(
+            r.headings,
+            vec![Heading {
+                level: 1,
+                text: "Title".into(),
+                source: 0
+            }]
         );
     }
 

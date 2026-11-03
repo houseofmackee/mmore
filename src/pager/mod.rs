@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use crossterm::cursor::{self, MoveTo};
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::queue;
 use crossterm::style::{Attribute, Print, SetAttribute};
@@ -139,7 +139,7 @@ pub fn run(document: Document, opts: &Options) -> io::Result<()> {
                 }
                 dirty = true;
             }
-            Some(Event::Mouse(mouse)) => dirty = pager.mouse(mouse.kind),
+            Some(Event::Mouse(mouse)) => dirty = pager.mouse(mouse.kind, mouse.column, mouse.row),
             Some(Event::Resize(..)) => {
                 // Query again: the size in the event can be stale during a drag.
                 let (cols, rows) = terminal::size()?;
@@ -604,17 +604,19 @@ impl<'a> Pager<'a> {
     }
 
     /// Scroll on mouse wheel turns. Returns whether the screen needs a redraw.
-    fn mouse(&mut self, kind: MouseEventKind) -> bool {
-        self.selected_link = None;
-        let delta = match kind {
-            MouseEventKind::ScrollDown => WHEEL_ROWS,
-            MouseEventKind::ScrollUp => -WHEEL_ROWS,
-            _ => return false,
-        };
+    /// A mouse event at `column`, `row` (0-based). Returns whether to redraw.
+    fn mouse(&mut self, kind: MouseEventKind, column: u16, row: u16) -> bool {
         // Leave a prompt being typed alone.
         if self.prompt.is_some() {
             return false;
         }
+        let delta = match kind {
+            MouseEventKind::ScrollDown => WHEEL_ROWS,
+            MouseEventKind::ScrollUp => -WHEEL_ROWS,
+            MouseEventKind::Down(MouseButton::Left) => return self.click(column, row),
+            _ => return false,
+        };
+        self.selected_link = None;
         let vp = match &mut self.help {
             Some(help) => &mut help.vp,
             None => &mut self.view.vp,
@@ -754,6 +756,42 @@ impl<'a> Pager<'a> {
         let row = self.view.wrapped.first_row_of(source);
         let vp = &mut self.view.vp;
         vp.top = row.min(vp.max_top());
+    }
+
+    /// A left click: follow the link under the mouse, if there is one.
+    fn click(&mut self, column: u16, row: u16) -> bool {
+        if self.help.is_some() || self.toc.is_some() {
+            return false;
+        }
+        let Some(link) = self.link_at(column as usize, row as usize) else {
+            return false;
+        };
+        self.message = None;
+        self.selected_link = None;
+        self.follow_link(link);
+        true
+    }
+
+    /// The link shown at screen position `column`, `row`.
+    fn link_at(&self, column: usize, row: usize) -> Option<u32> {
+        let view = &self.view;
+        if row >= view.vp.height {
+            return None;
+        }
+        let line = view.wrapped.rows.get(view.vp.top + row)?;
+        let mut x = column.checked_sub(view.gutter)?;
+        if self.chop {
+            x += self.hscroll;
+        }
+        let mut start = 0;
+        for span in &line.spans {
+            let end = start + span.text.width();
+            if x < end {
+                return span.style.link;
+            }
+            start = end;
+        }
+        None
     }
 
     /// Tab and Shift-Tab: select the next or previous link, starting from the
@@ -2045,24 +2083,24 @@ mod tests {
     fn mouse_wheel_scrolls() {
         let d = doc(&[("a.txt", &numbered(50)), ("b.txt", "x\n")]);
         let mut p = Pager::new(d, &OPTS, 80, 10);
-        assert!(p.mouse(MouseEventKind::ScrollDown));
+        assert!(p.mouse(MouseEventKind::ScrollDown, 0, 0));
         assert_eq!(top_text(&p), "line 4");
-        assert!(p.mouse(MouseEventKind::ScrollUp));
+        assert!(p.mouse(MouseEventKind::ScrollUp, 0, 0));
         assert_eq!(top_text(&p), "line 1");
         // Nothing to do at the top, or for other mouse events.
-        assert!(!p.mouse(MouseEventKind::ScrollUp));
-        assert!(!p.mouse(MouseEventKind::Moved));
+        assert!(!p.mouse(MouseEventKind::ScrollUp, 0, 0));
+        assert!(!p.mouse(MouseEventKind::Moved, 0, 0));
         // The wheel never switches files at the end.
         press(&mut p, "G");
-        assert!(!p.mouse(MouseEventKind::ScrollDown));
+        assert!(!p.mouse(MouseEventKind::ScrollDown, 0, 0));
         assert_eq!(p.file, 0);
         // It scrolls the help screen while that is open, and not a typed prompt.
         press(&mut p, "gh");
-        p.mouse(MouseEventKind::ScrollDown);
+        p.mouse(MouseEventKind::ScrollDown, 0, 0);
         assert_eq!(p.help.as_ref().unwrap().vp.top, 3);
         assert_eq!(top_text(&p), "line 1");
         press(&mut p, "q/abc");
-        assert!(!p.mouse(MouseEventKind::ScrollDown));
+        assert!(!p.mouse(MouseEventKind::ScrollDown, 0, 0));
         assert_eq!(top_text(&p), "line 1");
     }
 
@@ -2579,6 +2617,50 @@ mod tests {
         press(&mut p, "\n");
         assert_eq!(p.view.vp.top, top + 1);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn clicking_a_link_follows_it() {
+        let text = format!(
+            "# Top\n\nGo [down](#later) now.\n\n{}## Later\n\n{}",
+            paras(20),
+            paras(10)
+        );
+        let mut p = Pager::new(doc(&[("a.md", &text)]), &OPTS, 40, 8);
+        // Row 3 is "Go down now."; "down" is at columns 3 to 6.
+        assert_eq!(top_text(&p), "Top");
+        assert!(
+            !p.mouse(MouseEventKind::Down(MouseButton::Left), 1, 3),
+            "not on the link"
+        );
+        assert!(p.mouse(MouseEventKind::Down(MouseButton::Left), 4, 3));
+        assert!(top_text(&p).contains("Later"), "{}", top_text(&p));
+        press(&mut p, "\x08");
+        assert_eq!(top_text(&p), "Top");
+        // A click below the text, or on the status line, does nothing.
+        assert!(!p.mouse(MouseEventKind::Down(MouseButton::Left), 4, 7));
+    }
+
+    #[test]
+    fn links_and_headings_work_in_the_raw_view() {
+        let text = format!(
+            "# Top\n\nGo [down](#later) now.\n\n{}## Later\n\n{}",
+            paras(20),
+            paras(10)
+        );
+        let mut p = Pager::new(doc(&[("a.md", &text)]), &OPTS, 40, 8);
+        press(&mut p, "r");
+        assert_eq!(top_text(&p), "# Top");
+        press(&mut p, "\t");
+        assert!(p.message.as_deref().unwrap().starts_with("Link: #later"));
+        press(&mut p, "\n");
+        assert_eq!(top_text(&p), "## Later");
+        press(&mut p, "g]");
+        assert_eq!(
+            top_text(&p),
+            "## Later",
+            "] uses the headings in the raw view too"
+        );
     }
 
     #[test]
