@@ -67,6 +67,161 @@ impl Action {
     }
 }
 
+/// Actions that keys can be bound to in the config file, with their names.
+pub const ACTIONS: &[(&str, Action)] = &[
+    ("line-down", Action::LineDown),
+    ("line-up", Action::LineUp),
+    ("page-down", Action::PageDown),
+    ("page-up", Action::PageUp),
+    ("half-page-down", Action::HalfDown),
+    ("half-page-up", Action::HalfUp),
+    ("top", Action::Top),
+    ("bottom", Action::Bottom),
+    ("percent", Action::Percent),
+    ("search-forward", Action::SearchForward),
+    ("search-backward", Action::SearchBackward),
+    ("next-match", Action::NextMatch),
+    ("previous-match", Action::PrevMatch),
+    ("clear-search", Action::ClearSearch),
+    ("filter", Action::Filter),
+    ("command", Action::Command),
+    ("show-position", Action::ShowPosition),
+    ("toggle-raw", Action::ToggleRaw),
+    ("toggle-wrap", Action::ToggleWrap),
+    ("scroll-left", Action::ScrollLeft),
+    ("scroll-right", Action::ScrollRight),
+    ("follow", Action::Follow),
+    ("next-heading", Action::NextHeading),
+    ("previous-heading", Action::PrevHeading),
+    ("contents", Action::Contents),
+    ("next-link", Action::NextLink),
+    ("previous-link", Action::PrevLink),
+    ("back", Action::Back),
+    ("set-mark", Action::SetMark),
+    ("go-to-mark", Action::GoToMark),
+    ("edit", Action::Edit),
+    ("reload", Action::Reload),
+    ("help", Action::Help),
+    ("suspend", Action::Suspend),
+    ("quit", Action::Quit),
+    ("nothing", Action::None),
+];
+
+/// Key bindings from the config file, checked before the default ones.
+#[derive(Debug, Default, Clone)]
+pub struct Keymap {
+    /// Key, modifiers, action, and the binding as written (for the help screen).
+    bindings: Vec<(KeyCode, KeyModifiers, Action, String, String)>,
+}
+
+impl Keymap {
+    /// No bindings, in a constant (tests use it in a static).
+    #[cfg(test)]
+    pub const fn new() -> Self {
+        Keymap {
+            bindings: Vec::new(),
+        }
+    }
+
+    /// Bind `key` (like `x`, `Ctrl-x`, `Alt-x`, `Shift-Tab`, `PageDown`) to the
+    /// action named `action` (one of `ACTIONS`).
+    pub fn bind(&mut self, key: &str, action: &str) -> Result<(), String> {
+        let (code, modifiers) = parse_key(key)?;
+        let Some(&(name, action)) = ACTIONS.iter().find(|(name, _)| *name == action) else {
+            return Err(format!(
+                "unknown action '{action}' (one of: {})",
+                ACTIONS
+                    .iter()
+                    .map(|(n, _)| *n)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        };
+        self.bindings
+            .push((code, modifiers, action, key.to_string(), name.to_string()));
+        Ok(())
+    }
+
+    /// The action for `key`: a binding from the config file (the last one for
+    /// the key), or the default.
+    pub fn map(&self, key: KeyEvent) -> Action {
+        let (code, modifiers) = normalize(key.code, key.modifiers);
+        self.bindings
+            .iter()
+            .rev()
+            .find(|(c, m, ..)| *c == code && *m == modifiers)
+            .map_or_else(|| map(key), |(_, _, action, ..)| *action)
+    }
+
+    /// The bindings as written: key and action name.
+    pub fn bindings(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.bindings
+            .iter()
+            .map(|(.., key, action)| (key.as_str(), action.as_str()))
+    }
+}
+
+/// Only Ctrl and Alt matter. Shift is part of the character (`G`), and
+/// terminals differ in whether they report it.
+fn normalize(code: KeyCode, modifiers: KeyModifiers) -> (KeyCode, KeyModifiers) {
+    let modifiers = modifiers & (KeyModifiers::CONTROL | KeyModifiers::ALT);
+    let code = match code {
+        KeyCode::Char(c) if modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(c.to_ascii_lowercase())
+        }
+        code => code,
+    };
+    (code, modifiers)
+}
+
+/// A key as written in the config file: a character, or a name like `Enter`,
+/// with `Ctrl-` and `Alt-` in front as needed. Names ignore case.
+pub fn parse_key(text: &str) -> Result<(KeyCode, KeyModifiers), String> {
+    let mut rest = text;
+    let mut modifiers = KeyModifiers::NONE;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        if rest.chars().count() > 1 && (lower.starts_with("ctrl-") || lower.starts_with("alt-")) {
+            let (prefix, after) = rest.split_once('-').expect("has a dash");
+            modifiers |= if prefix.eq_ignore_ascii_case("ctrl") {
+                KeyModifiers::CONTROL
+            } else {
+                KeyModifiers::ALT
+            };
+            rest = after;
+        } else {
+            break;
+        }
+    }
+    let mut chars = rest.chars();
+    let code = match (chars.next(), chars.next()) {
+        (Some(c), None) => KeyCode::Char(c),
+        _ => match rest.to_ascii_lowercase().as_str() {
+            "enter" | "return" => KeyCode::Enter,
+            "tab" => KeyCode::Tab,
+            "shift-tab" | "backtab" => KeyCode::BackTab,
+            "backspace" => KeyCode::Backspace,
+            "esc" | "escape" => KeyCode::Esc,
+            "space" => KeyCode::Char(' '),
+            "up" => KeyCode::Up,
+            "down" => KeyCode::Down,
+            "left" => KeyCode::Left,
+            "right" => KeyCode::Right,
+            "home" => KeyCode::Home,
+            "end" => KeyCode::End,
+            "pageup" | "pgup" => KeyCode::PageUp,
+            "pagedown" | "pgdn" => KeyCode::PageDown,
+            "insert" => KeyCode::Insert,
+            "delete" | "del" => KeyCode::Delete,
+            name => match name.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()) {
+                Some(n @ 1..=12) => KeyCode::F(n),
+                _ => return Err(format!("unknown key '{text}'")),
+            },
+        },
+    };
+    Ok(normalize(code, modifiers))
+}
+
 pub fn map(key: KeyEvent) -> Action {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
@@ -271,6 +426,53 @@ mod tests {
         assert_eq!(map(key(KeyCode::Tab)), Action::NextLink);
         assert_eq!(map(key(KeyCode::BackTab)), Action::PrevLink);
         assert_eq!(map(key(KeyCode::Backspace)), Action::Back);
+    }
+
+    #[test]
+    fn config_bindings_come_before_the_defaults() {
+        let mut keys = Keymap::new();
+        keys.bind("x", "quit").unwrap();
+        keys.bind("Ctrl-J", "page-down").unwrap();
+        keys.bind("q", "nothing").unwrap();
+        keys.bind("Shift-Tab", "back").unwrap();
+        keys.bind("F5", "reload").unwrap();
+        keys.bind("alt-n", "next-heading").unwrap();
+        keys.bind("space", "half-page-down").unwrap();
+        assert_eq!(keys.map(key(KeyCode::Char('x'))), Action::Quit);
+        assert_eq!(keys.map(ctrl('j')), Action::PageDown);
+        assert_eq!(keys.map(key(KeyCode::Char('q'))), Action::None);
+        let shift = |code| KeyEvent::new(code, KeyModifiers::SHIFT);
+        assert_eq!(keys.map(shift(KeyCode::BackTab)), Action::Back);
+        assert_eq!(keys.map(key(KeyCode::F(5))), Action::Reload);
+        let alt = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT);
+        assert_eq!(keys.map(alt), Action::NextHeading);
+        assert_eq!(keys.map(key(KeyCode::Char(' '))), Action::HalfDown);
+        // Other keys keep their defaults; a later binding wins.
+        assert_eq!(keys.map(key(KeyCode::Char('g'))), Action::Top);
+        keys.bind("x", "help").unwrap();
+        assert_eq!(keys.map(key(KeyCode::Char('x'))), Action::Help);
+        // Uppercase letters match with or without Shift reported.
+        keys.bind("G", "quit").unwrap();
+        assert_eq!(keys.map(shift(KeyCode::Char('G'))), Action::Quit);
+        assert_eq!(keys.map(key(KeyCode::Char('G'))), Action::Quit);
+    }
+
+    #[test]
+    fn bad_bindings_are_errors() {
+        let mut keys = Keymap::new();
+        assert_eq!(
+            keys.bind("Hyper-x", "quit").unwrap_err(),
+            "unknown key 'Hyper-x'"
+        );
+        assert!(
+            keys.bind("x", "explode")
+                .unwrap_err()
+                .starts_with("unknown action 'explode' (one of: line-down,")
+        );
+        assert_eq!(keys.bind("F13", "quit").unwrap_err(), "unknown key 'F13'");
+        // A dash alone, or "Ctrl-" followed by a dash, is still a key.
+        assert!(keys.bind("-", "page-up").is_ok());
+        assert!(keys.bind("Ctrl--", "page-up").is_ok());
     }
 
     #[test]

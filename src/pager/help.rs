@@ -62,7 +62,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("q  :q  Ctrl-C", "Quit"),
 ];
 
-pub fn lines() -> Vec<Line> {
+pub fn lines(keymap: &super::keys::Keymap) -> Vec<Line> {
     let bold = Style {
         bold: true,
         ..Style::default()
@@ -79,6 +79,24 @@ pub fn lines() -> Vec<Line> {
         line.push(&format!("  {keys:<width$}"), bold);
         line.push(&format!("  {what}"), Style::default());
         lines.push(line);
+    }
+    let custom: Vec<(&str, &str)> = keymap.bindings().collect();
+    if !custom.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line {
+            spans: vec![crate::style::Span::new(
+                "Your keys (from the config file)",
+                bold,
+            )],
+        });
+        lines.push(Line::default());
+        let width = custom.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+        for (key, action) in custom {
+            let mut line = Line::default();
+            line.push(&format!("  {key:<width$}"), bold);
+            line.push(&format!("  {action}"), Style::default());
+            lines.push(line);
+        }
     }
     lines.push(Line::default());
     lines.push(Line::plain("Press q or h to return."));

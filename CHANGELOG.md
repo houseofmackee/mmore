@@ -5,6 +5,12 @@ section here, so a version can only be released once it has one.
 
 ## [Unreleased]
 
+### Added
+
+- A config file (`~/.config/mmore/config`, or the file in `MMORE_CONFIG`) for
+  default options and key bindings, such as `bind x quit`. The help screen lists
+  the bindings.
+
 ## [0.5.0] - 2026-11-03
 
 ### Added

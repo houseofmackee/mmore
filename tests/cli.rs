@@ -4,7 +4,7 @@ use predicates::prelude::*;
 fn mmore() -> Command {
     let mut cmd = Command::cargo_bin("mmore").unwrap();
     // Keep the user's own defaults out of the tests.
-    cmd.env_remove("MMORE_OPTS");
+    cmd.env_remove("MMORE_OPTS").env("MMORE_CONFIG", "");
     cmd
 }
 
@@ -799,4 +799,77 @@ fn man_page_has_options_keys_and_environment() {
         .stdout(predicate::str::contains("\\fBTab, Shift\\-Tab\\fR"))
         .stdout(predicate::str::contains(".SH ENVIRONMENT"))
         .stdout(predicate::str::contains("MMORE_OPTS"));
+}
+
+/// A config file with `text`, in a fresh directory; returns the directory.
+fn config_dir(name: &str, text: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("mmore-config-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(dir.join("mmore")).unwrap();
+    std::fs::write(dir.join("mmore").join("config"), text).unwrap();
+    dir
+}
+
+#[test]
+fn config_file_sets_defaults_that_opts_and_arguments_override() {
+    let dir = config_dir("order", "# line numbers by default\n-n\n--width 30\n");
+    let config = dir.join("mmore").join("config");
+    let run = |opts: Option<&str>, args: &[&str]| {
+        let mut cmd = mmore();
+        cmd.env("MMORE_CONFIG", &config)
+            .arg("tests/fixtures/sample.md");
+        if let Some(opts) = opts {
+            cmd.env("MMORE_OPTS", opts);
+        }
+        let out = cmd.args(args).output().unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert!(run(None, &[]).starts_with("  1 # Title"), "config adds -n");
+    // The config file is found in $XDG_CONFIG_HOME/mmore/config too.
+    let out = mmore()
+        .env_remove("MMORE_CONFIG")
+        .env("XDG_CONFIG_HOME", &dir)
+        .arg("tests/fixtures/sample.md")
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .starts_with("  1 # Title")
+    );
+    // MMORE_OPTS comes after the config file, and the command line after both.
+    let wide = run(Some("--width 60 --color always"), &[]);
+    let narrow = run(Some("--width 60 --color always"), &["--width", "20"]);
+    assert!(wide.contains(&"═".repeat(60)), "{wide}");
+    assert!(
+        narrow.contains(&"═".repeat(20)) && !narrow.contains(&"═".repeat(21)),
+        "{narrow}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn config_file_errors_stop_with_the_line() {
+    let dir = config_dir("bad", "-n\nbind x explode\n");
+    mmore()
+        .env("MMORE_CONFIG", dir.join("mmore").join("config"))
+        .arg("tests/fixtures/sample.md")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "config: line 2: unknown action 'explode'",
+        ));
+    // A config file named explicitly must exist; the default one need not.
+    mmore()
+        .env("MMORE_CONFIG", dir.join("missing"))
+        .arg("tests/fixtures/sample.md")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("missing"));
+    mmore()
+        .env_remove("MMORE_CONFIG")
+        .env("XDG_CONFIG_HOME", dir.join("nowhere"))
+        .arg("tests/fixtures/sample.md")
+        .assert()
+        .success();
+    std::fs::remove_dir_all(dir).unwrap();
 }

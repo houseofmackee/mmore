@@ -6,6 +6,7 @@ use std::env;
 use std::ffi::OsString;
 
 use crate::ansi::When;
+use crate::pager::keys::Keymap;
 
 /// Environment variables, for the manual page (`AFTER_HELP` lists them too).
 const ENVIRONMENT: &[(&str, &str)] = &[
@@ -22,6 +23,10 @@ const ENVIRONMENT: &[(&str, &str)] = &[
         "Terminal colors; a light background selects a light theme",
     ),
     ("VISUAL, EDITOR", "The editor that v opens"),
+    (
+        "MMORE_CONFIG",
+        "The config file (empty for none); by default $XDG_CONFIG_HOME/mmore/config or ~/.config/mmore/config",
+    ),
 ];
 
 const AFTER_HELP: &str = concat!(
@@ -30,19 +35,87 @@ const AFTER_HELP: &str = concat!(
     "  NO_COLOR     Disable colors (text attributes such as bold are kept)\n",
     "  COLORFGBG    Terminal colors; a light background selects a light theme\n",
     "  VISUAL, EDITOR   The editor that v opens\n",
+    "  MMORE_CONFIG Config file (empty for none; default ~/.config/mmore/config)\n",
+    "\n",
+    "Config file: options as on the command line, one or more per line, and\n",
+    "\"bind KEY ACTION\" lines (for example \"bind x quit\"); # starts a comment.\n",
     "\n",
     "Press h while paging for the list of keys."
 );
 
-/// Command-line arguments with the options from `MMORE_OPTS` inserted first.
-pub fn args() -> Vec<OsString> {
+/// Command-line arguments with the options from the config file and then
+/// `MMORE_OPTS` in front, so that later ones win: the config file, then
+/// `MMORE_OPTS`, then the command line.
+pub fn args(config: &[String]) -> Vec<OsString> {
     let mut args: Vec<OsString> = env::args_os().collect();
+    let mut extra: Vec<String> = config.to_vec();
     if let Some(opts) = env::var_os("MMORE_OPTS") {
-        let extra = split_words(&opts.to_string_lossy());
-        let at = args.len().min(1);
-        args.splice(at..at, extra.into_iter().map(OsString::from));
+        extra.extend(split_words(&opts.to_string_lossy()));
     }
+    let at = args.len().min(1);
+    args.splice(at..at, extra.into_iter().map(OsString::from));
     args
+}
+
+/// What the config file sets.
+#[derive(Debug, Default)]
+pub struct Config {
+    /// Options, as on the command line.
+    pub args: Vec<String>,
+    pub keymap: Keymap,
+}
+
+/// Where the config file is: `MMORE_CONFIG` if set (empty for none), otherwise
+/// `mmore/config` in `$XDG_CONFIG_HOME` or `~/.config`. Also whether the
+/// location was given explicitly (then it must exist).
+pub fn config_path() -> Option<(PathBuf, bool)> {
+    if let Some(path) = env::var_os("MMORE_CONFIG") {
+        return (!path.is_empty()).then(|| (PathBuf::from(path), true));
+    }
+    let base = env::var_os("XDG_CONFIG_HOME")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    Some((base.join("mmore").join("config"), false))
+}
+
+/// Read the config file, if there is one.
+pub fn load_config() -> Result<Config, String> {
+    let Some((path, explicit)) = config_path() else {
+        return Ok(Config::default());
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_config(&text).map_err(|e| format!("{}: {e}", path.display())),
+        Err(e) if !explicit && e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Each line is an option as on the command line (`--theme InspiredGitHub`,
+/// `-n`), or `bind KEY ACTION`. `#` starts a comment line.
+pub fn parse_config(text: &str) -> Result<Config, String> {
+    let mut config = Config::default();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let words = split_words(line);
+        let fail = |e: String| format!("line {}: {e}", n + 1);
+        match words.first().map(String::as_str) {
+            Some("bind") => match &words[1..] {
+                [key, action] => config.keymap.bind(key, action).map_err(fail)?,
+                _ => return Err(fail("expected bind KEY ACTION".into())),
+            },
+            Some(word) if word.starts_with('-') => config.args.extend(words),
+            _ => {
+                return Err(fail(format!(
+                    "expected an option (like --theme NAME) or bind KEY ACTION, not '{line}'"
+                )));
+            }
+        }
+    }
+    Ok(config)
 }
 
 /// Split like a shell: whitespace separates words, quotes group them, and a
@@ -237,6 +310,22 @@ pub fn man_page(out: &mut impl std::io::Write) -> std::io::Result<()> {
     for (name, what) in ENVIRONMENT {
         writeln!(out, ".TP\n\\fB{}\\fR\n{}", roff(name), roff(what))?;
     }
+    writeln!(out, ".SH FILES")?;
+    writeln!(out, ".TP\n\\fB~/.config/mmore/config\\fR")?;
+    writeln!(
+        out,
+        "{}",
+        roff(
+            "Defaults and key bindings (in $XDG_CONFIG_HOME/mmore/config if that is set, or the file in MMORE_CONFIG). \
+             Each line is options as on the command line, or bind KEY ACTION; # starts a comment line. \
+             The actions are: "
+        )
+    )?;
+    let actions: Vec<&str> = crate::pager::keys::ACTIONS
+        .iter()
+        .map(|(n, _)| *n)
+        .collect();
+    writeln!(out, "{}.", roff(&actions.join(", ")))?;
     writeln!(out, ".SH SEE ALSO")?;
     writeln!(out, "less(1), more(1)")?;
     man.render_version_section(out)
@@ -255,6 +344,33 @@ fn roff(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_lines() {
+        let config = parse_config(
+            "# defaults\n\n-n\n--theme \"Solarized (dark)\"\n  bind x quit\nbind Ctrl-d page-down\n",
+        )
+        .unwrap();
+        assert_eq!(config.args, vec!["-n", "--theme", "Solarized (dark)"]);
+        let bound: Vec<_> = config.keymap.bindings().collect();
+        assert_eq!(bound, vec![("x", "quit"), ("Ctrl-d", "page-down")]);
+    }
+
+    #[test]
+    fn config_errors_name_the_line() {
+        assert_eq!(
+            parse_config("-n\ntheme x\n").unwrap_err(),
+            "line 2: expected an option (like --theme NAME) or bind KEY ACTION, not 'theme x'"
+        );
+        assert_eq!(
+            parse_config("bind x\n").unwrap_err(),
+            "line 1: expected bind KEY ACTION"
+        );
+        assert_eq!(
+            parse_config("\n\nbind Hyper-x quit").unwrap_err(),
+            "line 3: unknown key 'Hyper-x'"
+        );
+    }
 
     #[test]
     fn split_words_like_a_shell() {

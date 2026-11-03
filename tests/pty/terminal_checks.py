@@ -43,6 +43,8 @@ def clean_env(extra=None):
         "HOME": os.environ.get("HOME", "/tmp"),
         "LANG": "en_US.UTF-8",
         "TERM": "xterm-256color",
+        # Keep the user's own config file out of the checks.
+        "MMORE_CONFIG": "",
     }
     env.update(extra or {})
     return env
@@ -475,6 +477,19 @@ def background():
     check("the cursor is at the start of a line after quitting", text.endswith(ALT_OFF + "\r"), repr(text[-12:]))
 
 
+def config_keys(tmp, n100):
+    # Keys bound in the config file: x quits, q is turned off, and the help
+    # screen lists the bindings.
+    config = os.path.join(tmp, "keys.conf")
+    with open(config, "w") as f:
+        f.write("bind x quit\nbind q nothing\n")
+    # q no longer closes the help screen either, so Esc does.
+    out, code, snaps = run(f"{BIN} {n100}", ["h", "\x1b", "q", "x"], rows=60, cols=80, env={"MMORE_CONFIG": config})
+    check("the help screen lists the keys from the config file", "Your keys (from the config file)" in after(snaps, 0) and "nothing" in after(snaps, 0))
+    check("a key bound to nothing does nothing", ALT_OFF not in after(snaps, 2))
+    check("a key bound in the config file works", code == 0 and ALT_OFF in after(snaps, 3))
+
+
 def less_keys(tmp, n100):
     # A count before g, %, and j: go to a line, a percentage, or move N lines.
     out, code, snaps = run(f"{BIN} {n100}", ["4", "2", "g", "5", "0", "%", "q"], rows=10, cols=40)
@@ -743,6 +758,7 @@ def main():
         pager_features(n100, links)
         mouse(n100)
         less_keys(tmp, n100)
+        config_keys(tmp, n100)
         reading_documents(tmp)
         input_colors(tmp)
         streaming()

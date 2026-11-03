@@ -6,7 +6,7 @@
 
 mod editor;
 pub mod help;
-mod keys;
+pub mod keys;
 mod screen;
 mod search;
 mod viewport;
@@ -52,6 +52,8 @@ pub struct Options<'a> {
     pub watch: bool,
     /// How to load a file again after editing it.
     pub reload: Option<Reload<'a>>,
+    /// Key bindings from the config file.
+    pub keymap: &'a keys::Keymap,
 }
 
 /// Page the document interactively until the user quits.
@@ -380,7 +382,7 @@ impl<'a> Pager<'a> {
 
     fn layout_help(&mut self) {
         let mut rendered = Rendered::default();
-        for (i, line) in help::lines().into_iter().enumerate() {
+        for (i, line) in help::lines(self.opts.keymap).into_iter().enumerate() {
             rendered.push(line, i);
         }
         let wrapped = wrap_all(rendered, self.cols as usize);
@@ -425,7 +427,7 @@ impl<'a> Pager<'a> {
         if let Some((kind, input)) = self.prompt.take() {
             return self.prompt_key(kind, input, key);
         }
-        let action = keys::map(key);
+        let action = self.opts.keymap.map(key);
 
         if let Some(help) = &mut self.help {
             match action {
@@ -1763,7 +1765,10 @@ mod tests {
         chop: false,
         watch: false,
         reload: None,
+        keymap: &NO_KEYS,
     };
+
+    static NO_KEYS: keys::Keymap = keys::Keymap::new();
 
     fn press(p: &mut Pager, keys: &str) -> Flow {
         let mut flow = Flow::Continue;

@@ -41,7 +41,14 @@ fn main() -> ExitCode {
         }
         None => {}
     }
-    let cli = Cli::parse_from(cli::args());
+    let config = match cli::load_config() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("mmore: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let cli = Cli::parse_from(cli::args(&config.args));
 
     if cli.list_themes {
         return finish(list_themes());
@@ -91,7 +98,13 @@ fn main() -> ExitCode {
         When::Auto => stdout_is_tty && color.enabled() && ansi::hyperlinks_supported(),
     };
 
-    match output(&cli, &settings, document, color, hyperlinks, stdout_is_tty) {
+    let view = View {
+        color,
+        hyperlinks,
+        stdout_is_tty,
+        keymap: config.keymap,
+    };
+    match output(&cli, &settings, document, view) {
         Ok(()) if all_ok => ExitCode::SUCCESS,
         Ok(()) => ExitCode::FAILURE,
         Err(e) => {
@@ -368,14 +381,21 @@ fn content_kind(cli: &Cli, origin: &Origin, text: &str, settings: &Settings) -> 
 }
 
 /// Page the document on a terminal, or print it when paging is off or pointless.
-fn output(
-    cli: &Cli,
-    settings: &Settings,
-    document: Document,
+/// How the output is shown: what the terminal can do, and the user's keys.
+struct View {
     color: ColorMode,
     hyperlinks: bool,
     stdout_is_tty: bool,
-) -> io::Result<()> {
+    keymap: pager::keys::Keymap,
+}
+
+fn output(cli: &Cli, settings: &Settings, document: Document, view: View) -> io::Result<()> {
+    let View {
+        color,
+        hyperlinks,
+        stdout_is_tty,
+        keymap,
+    } = view;
     let size = crossterm::terminal::size().ok().filter(|_| stdout_is_tty);
     let Some((cols, rows)) = size.filter(|_| !cli.no_pager) else {
         let width = size.map_or(DEFAULT_WIDTH, |(cols, _)| cols as usize);
@@ -426,6 +446,7 @@ fn output(
             chop: cli.chop_long_lines,
             watch: cli.watch,
             reload: Some(&reload),
+            keymap: &keymap,
         },
     )
 }

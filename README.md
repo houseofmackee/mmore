@@ -155,6 +155,36 @@ mmore notes.md                    # line numbers, Solarized
 mmore --theme InspiredGitHub x.rs # line numbers, InspiredGitHub
 ```
 
+### Config file
+
+Defaults and key bindings can also go in a config file:
+`~/.config/mmore/config` (or `$XDG_CONFIG_HOME/mmore/config`), or the file named
+in `MMORE_CONFIG`. Set `MMORE_CONFIG` to an empty value to ignore the file. Each
+line is either options, written as on the command line, or `bind KEY ACTION`;
+lines starting with `#` are comments:
+
+```sh
+# Line numbers and a light theme by default.
+-n
+--theme InspiredGitHub
+
+# x quits, Ctrl-J pages down, and q does nothing.
+bind x quit
+bind Ctrl-J page-down
+bind q nothing
+```
+
+Options in the file come first, then `MMORE_OPTS`, then the command line, so each
+can override the one before. Bindings replace the default meaning of a key; the
+help screen (`h`) lists them at the end. A mistake in the file stops `mmore` with
+the line number, before anything is shown.
+
+Keys are a character (`x`, `G`, `/`), or one of `Enter`, `Tab`, `Shift-Tab`,
+`Backspace`, `Esc`, `Space`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`,
+`PageUp`, `PageDown`, `Insert`, `Delete`, and `F1` to `F12`, with `Ctrl-` or
+`Alt-` in front as needed. The actions are `line-down`, `line-up`, `page-down`, `page-up`, `half-page-down`, `half-page-up`, `top`, `bottom`, `percent`, `search-forward`, `search-backward`, `next-match`, `previous-match`, `clear-search`, `filter`, `command`, `show-position`, `toggle-raw`, `toggle-wrap`, `scroll-left`, `scroll-right`, `follow`, `next-heading`, `previous-heading`, `contents`, `next-link`, `previous-link`, `back`, `set-mark`, `go-to-mark`, `edit`, `reload`, `help`, `suspend`, `quit`, and `nothing`. Typing in a
+prompt (after `/`, `:`, `&`, `m`, or `'`) is not affected.
+
 ### Mouse
 
 With `--mouse`, the wheel scrolls three lines at a time, and clicking a link
