@@ -66,6 +66,10 @@ pub fn run(document: Document, opts: &Options) -> io::Result<()> {
         return Ok(());
     }
     document.start_highlighting();
+    // Start listening for size changes before taking over the screen: a
+    // terminal may change the size as a full-screen program starts, and a
+    // change signalled before the first wait for input would be missed.
+    let _ = event::poll(Duration::ZERO);
     let screen = Screen::enter(opts.mouse)?;
     let mut out = BufWriter::new(io::stdout());
     let (cols, rows) = terminal::size()?;
@@ -84,6 +88,14 @@ pub fn run(document: Document, opts: &Options) -> io::Result<()> {
     // Highlighted lines available at the last draw.
     let mut drawn = 0;
     loop {
+        // In case a size change was missed after all (the signal can come at a
+        // moment when nothing listens), compare with the real size.
+        if let Ok((cols, rows)) = terminal::size()
+            && (cols, rows) != (pager.cols, pager.rows)
+        {
+            pager.resize(cols, rows);
+            dirty = true;
+        }
         if dirty {
             pager.draw(&mut out)?;
             drawn = pager.highlight_progress();
@@ -100,12 +112,14 @@ pub fn run(document: Document, opts: &Options) -> io::Result<()> {
         // While highlighting runs, input arrives, or a file is watched, wake up
         // now and then.
         let busy = pager.highlighting() || pager.reading();
-        let event = if busy || opts.watch {
-            let wait = if busy { HIGHLIGHT_POLL } else { WATCH_POLL };
-            event::poll(wait)?.then(event::read).transpose()?
+        let wait = if busy {
+            HIGHLIGHT_POLL
+        } else if opts.watch {
+            WATCH_POLL
         } else {
-            Some(event::read()?)
+            SIZE_POLL
         };
+        let event = event::poll(wait)?.then(event::read).transpose()?;
         match event {
             None => {
                 let highlighted = pager.newly_highlighted_on_screen(drawn);
@@ -167,6 +181,9 @@ const WHEEL_ROWS: isize = 3;
 const HIGHLIGHT_POLL: Duration = Duration::from_millis(25);
 /// How often `--watch` looks at the file.
 const WATCH_POLL: Duration = Duration::from_millis(250);
+/// How often to check the terminal size when idle, in case a size change
+/// signal was missed.
+const SIZE_POLL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, PartialEq, Eq)]
 enum Flow {

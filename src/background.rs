@@ -29,6 +29,17 @@ pub fn is_light() -> Option<bool> {
     parse_osc11(&answers).map(|(r, g, b)| luminance(r, g, b) > 0.5)
 }
 
+/// When the terminal did not answer in time, echo stays off until the pager
+/// takes over the terminal (or mmore ends), so that a late answer is not
+/// printed on the screen. This turns echo back on; with `discard`, a late answer
+/// still waiting is dropped first.
+pub fn end_quiet(discard: bool) {
+    #[cfg(unix)]
+    query::end_quiet(discard);
+    #[cfg(not(unix))]
+    let _ = discard;
+}
+
 /// Keys pressed while the terminal was being asked about its background: they
 /// were read along with its answer and must not be lost.
 static TYPEAHEAD: Mutex<Vec<u8>> = Mutex::new(Vec::new());
@@ -147,7 +158,58 @@ mod query {
         if !was_raw {
             let _ = terminal::disable_raw_mode();
         }
+        // Without the DA1 reply, the answers may still be on their way. If they
+        // came while echo is on, the terminal would print them on the screen.
+        if !reply.as_deref().is_some_and(has_da1_reply) {
+            start_quiet(&tty);
+        }
         reply
+    }
+
+    /// The terminal settings to go back to, while echo is off (see `start_quiet`).
+    static QUIET: std::sync::Mutex<Option<libc::termios>> = std::sync::Mutex::new(None);
+
+    /// Turn echo off until `end_quiet`, so that late answers are not printed.
+    fn start_quiet(tty: &std::fs::File) {
+        let fd = tty.as_raw_fd();
+        // SAFETY: `settings` is a plain C struct filled in by tcgetattr on an
+        // open terminal descriptor, and only read back by tcsetattr.
+        unsafe {
+            let mut settings: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(fd, &mut settings) != 0 {
+                return;
+            }
+            let original = settings;
+            settings.c_lflag &= !(libc::ECHO | libc::ECHONL);
+            if libc::tcsetattr(fd, libc::TCSANOW, &settings) == 0 {
+                *QUIET
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(original);
+            }
+        }
+    }
+
+    /// Put the terminal settings back after `start_quiet`. With `discard`, late
+    /// answers still waiting are dropped first, so the shell does not read them.
+    pub fn end_quiet(discard: bool) {
+        let original = QUIET
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(original) = original else {
+            return;
+        };
+        let Ok(tty) = OpenOptions::new().read(true).write(true).open("/dev/tty") else {
+            return;
+        };
+        let fd = tty.as_raw_fd();
+        // SAFETY: `original` came from tcgetattr on the same terminal.
+        unsafe {
+            if discard {
+                libc::tcflush(fd, libc::TCIFLUSH);
+            }
+            libc::tcsetattr(fd, libc::TCSANOW, &original);
+        }
     }
 
     fn exchange(tty: &mut std::fs::File, timeout: Duration) -> Option<Vec<u8>> {

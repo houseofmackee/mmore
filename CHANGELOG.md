@@ -5,6 +5,17 @@ section here, so a version can only be released once it has one.
 
 ## [Unreleased]
 
+### Fixed
+
+- The last line could be hidden under the status line, and the screen laid out
+  for the wrong size, when the terminal changed size just as the pager started
+  (as some terminals do when a program goes full screen). mmore now listens for
+  size changes before it starts and checks the size again while it waits.
+- When the terminal answered the background color query late (often while a web
+  document was being fetched), its answer was printed on the screen, and zsh
+  then showed its `%` mark after quitting. Echo now stays off until the pager
+  takes over, and a late answer is dropped before mmore exits.
+
 ## [0.6.0] - 2026-11-03
 
 ### Added

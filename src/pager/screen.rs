@@ -31,6 +31,9 @@ impl Screen {
     }
 
     fn setup(&self) -> io::Result<()> {
+        // Back to the settings from before a slow background query, so raw mode
+        // and leaving it start from those; a late answer is read as input now.
+        crate::background::end_quiet(false);
         terminal::enable_raw_mode()?;
         let mut out = io::stdout();
         execute!(out, terminal::EnterAlternateScreen, cursor::Hide)?;

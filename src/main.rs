@@ -30,6 +30,13 @@ use stream::Stream;
 use style::Line;
 
 fn main() -> ExitCode {
+    let code = run();
+    // A late answer to the background query must not reach the shell.
+    background::end_quiet(true);
+    code
+}
+
+fn run() -> ExitCode {
     match cli::Packaging::from_args() {
         Some(Ok(cli::Packaging::Completions(shell))) => {
             cli::completions(shell, &mut io::stdout());

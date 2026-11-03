@@ -529,6 +529,89 @@ def remote_documents(tmp):
         server.shutdown()
 
 
+def startup_timing(tmp):
+    """What can happen while mmore starts: a late answer, and a resize."""
+    import functools
+    import http.server
+    import threading
+
+    # The terminal answers the background query late (after mmore gave up),
+    # while a slow fetch keeps the pager from starting. The answer must not be
+    # echoed onto the screen, and echo must be on again afterwards.
+    site = os.path.join(tmp, "slow-site")
+    os.makedirs(site)
+    with open(os.path.join(site, "slow.md"), "w") as f:
+        f.write("# Slow\n\n" + "Text.\n\n" * 40)
+
+    class Slow(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            time.sleep(1.0)
+            super().do_GET()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Slow, directory=site))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/slow.md"
+        cmd = f"{BIN} {url}; stty -a | grep -o -- '-\\?echo ' | head -1; echo DONE"
+        pid, fd = spawn(cmd, clean_env(), 20, 80)
+        out = b""
+        start = time.time()
+        asked = None
+        replied = quit_sent = False
+        while time.time() - start < START_WAIT and b"DONE" not in out:
+            r, _, _ = select.select([fd], [], [], 0.01)
+            if r:
+                try:
+                    out += os.read(fd, 65536)
+                except OSError:
+                    break
+            if asked is None and b"\x1b]11;?" in out:
+                asked = time.time()
+            if asked and not replied and time.time() - asked > 0.3:
+                os.write(fd, b"\x1b]11;rgb:0b0b/1010/2020\x1b\\\x1b[?62;22c")
+                replied = True
+            if replied and not quit_sent and b"--More--" in out:
+                os.write(fd, b"q")
+                quit_sent = True
+        code, out = finish(pid, fd, out)
+    finally:
+        server.shutdown()
+    text = out.decode(errors="replace")
+    before = text.split(ALT_ON)[0]
+    check("a late answer is not echoed onto the screen", "rgb:" not in before and "^[" not in before, repr(before[-40:]))
+    check("echo is on again after a late answer", "-echo" not in text and "echo " in text.rsplit(ALT_OFF, 1)[-1])
+
+    # The terminal changes size the moment the pager starts (as a terminal may
+    # when a program goes full screen), even before the first screen is read.
+    pid, fd = spawn(f"{BIN} --always-page {MD}", clean_env(), 30, 100)
+    out = b""
+    start = time.time()
+    resized = False
+    while time.time() - start < START_WAIT:
+        r, _, _ = select.select([fd], [], [], 0.002)
+        if r:
+            try:
+                out += os.read(fd, 65536)
+            except OSError:
+                break
+        if not resized and ALT_ON.encode() in out:
+            set_size(fd, 29, 100)
+            os.kill(pid, signal.SIGWINCH)
+            resized, resized_at = True, time.time()
+        if resized and time.time() - resized_at > 1.5:
+            break
+    try:
+        os.write(fd, b"q")
+    except OSError:
+        pass
+    code, out = finish(pid, fd, out)
+    rows = re.findall(r"\x1b\[(\d+);1H\x1b\[2K\x1b\[\?25l", out.decode(errors="replace"))
+    check("a resize as the pager starts is not missed", rows[-1:] == ["29"], str(rows))
+
+
 def less_keys(tmp, n100):
     # A count before g, %, and j: go to a line, a percentage, or move N lines.
     out, code, snaps = run(f"{BIN} {n100}", ["4", "2", "g", "5", "0", "%", "q"], rows=10, cols=40)
@@ -802,6 +885,7 @@ def main():
         less_keys(tmp, n100)
         config_keys(tmp, n100)
         remote_documents(tmp)
+        startup_timing(tmp)
         reading_documents(tmp)
         input_colors(tmp)
         streaming()
