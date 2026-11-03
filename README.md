@@ -30,6 +30,9 @@ brew tap houseofmackee/tap
 brew trust houseofmackee/tap
 ```
 
+The plan for getting into homebrew-core, so that no tap is needed, is in
+[packaging/homebrew-core](packaging/homebrew-core/README.md).
+
 Or download the archive for your platform from the
 [latest release](https://github.com/houseofmackee/mmore/releases/latest), check it
 against `SHA256SUMS.txt`, and put `mmore` somewhere on your `PATH`. There are

@@ -1,0 +1,33 @@
+class Mmore < Formula
+  desc "Pager like more, with Markdown rendering and syntax highlighting"
+  homepage "https://github.com/houseofmackee/mmore"
+  url "@URL@"
+  sha256 "@SHA256@"
+  license any_of: ["MIT", "Apache-2.0"]
+  head "https://github.com/houseofmackee/mmore.git", branch: "main"
+
+  depends_on "rust" => :build
+
+  def install
+    system "cargo", "install", *std_cargo_args
+    generate_completions_from_executable(bin/"mmore", "--completions")
+    (man1/"mmore.1").write Utils.safe_popen_read(bin/"mmore", "--man")
+  end
+
+  test do
+    (testpath/"notes.md").write <<~MARKDOWN
+      # Notes
+
+      Some *emphasis* and a [link](https://example.com).
+    MARKDOWN
+    # Markdown is rendered: the heading marker is gone and emphasis is italic.
+    output = shell_output("#{bin}/mmore --color always --width 40 notes.md")
+    refute_match "# Notes", output
+    assert_match "\e[3memphasis\e[0m", output
+    # Output that is not a terminal is passed through unchanged.
+    assert_equal "plain text\n", pipe_output(bin/"mmore", "plain text\n")
+    # Compressed input is decompressed.
+    system "gzip", "notes.md"
+    assert_match "*emphasis*", shell_output("#{bin}/mmore notes.md.gz")
+  end
+end
