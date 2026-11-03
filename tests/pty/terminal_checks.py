@@ -104,10 +104,11 @@ def run(cmd, keys, rows=10, cols=80, resize=None, env=None, frame=True):
     After each key, output is read until it has been quiet for a moment, waiting
     up to KEY_WAIT for it to start. A snapshot of everything read so far is taken
     at the start and after each key.
-    "WAIT" pauses (for background work), "PAUSE" waits briefly, "RESIZE"
-    applies `resize` (rows, cols), ("UNTIL", text) reads until `text` appears
-    (at most 10 s; for complete frames on slow machines), and a function is
-    called (to change a file).
+    "PAUSE" waits briefly, "RESIZE" applies `resize` (rows, cols), and a
+    function is called (to change a file). To wait for something to happen,
+    however slow the machine, ("UNTIL", text) reads until `text` appears in new
+    output, and ("SHOWN", text) until it has appeared since the last key,
+    function, or resize (it may have arrived already); both give up after 10 s.
     """
     pid, fd = spawn(cmd, clean_env(env), rows, cols)
     out = b""
@@ -138,26 +139,28 @@ def run(cmd, keys, rows=10, cols=80, resize=None, env=None, frame=True):
     if frame and not ended:
         drain(first=0.3)
     snapshots = [out]
+    # Where the output after the last key, function, or resize starts.
+    mark = len(out)
     for k in keys:
-        if isinstance(k, tuple) and k[0] == "UNTIL":
-            since = len(out)
+        if isinstance(k, tuple) and k[0] in ("UNTIL", "SHOWN"):
+            since = len(out) if k[0] == "UNTIL" else mark
             deadline = time.time() + 10
             while k[1].encode() not in out[since:] and time.time() < deadline:
                 drain(first=0.5, quiet=0.1)
         elif callable(k):
+            mark = len(out)
             k()
             drain()
-        elif k == "WAIT":
-            time.sleep(1.5)
-            drain(0.5)
         elif k == "PAUSE":
             time.sleep(0.7)
             drain(0.3)
         elif k == "RESIZE":
+            mark = len(out)
             set_size(fd, *resize)
             os.kill(pid, signal.SIGWINCH)
             drain()
         else:
+            mark = len(out)
             try:
                 os.write(fd, k.encode())
             except OSError:
@@ -343,9 +346,10 @@ def pager_basics(tmp):
 
 
 def colors():
-    out, code, _ = run(f"{BIN} {SRC}", ["WAIT", "q"], rows=20)
+    # Highlighting runs in the background: wait until colored lines are drawn.
+    out, code, _ = run(f"{BIN} {SRC}", [("SHOWN", "38;5;"), "q"], rows=20)
     check("pager highlights code in 256 colors (lazily)", "38;5;" in out and code == 0)
-    out, code, _ = run(f"{BIN} {SRC}", ["WAIT", "q"], rows=20, env={"COLORTERM": "truecolor"})
+    out, code, _ = run(f"{BIN} {SRC}", [("SHOWN", "38;2;"), "q"], rows=20, env={"COLORTERM": "truecolor"})
     check("pager uses truecolor when advertised", "38;2;" in out)
     out, code, _ = run(f"{BIN} {SRC}", ["q"], rows=20, env={"NO_COLOR": "1"})
     check("NO_COLOR disables colors in pager", "38;5;" not in out and "38;2;" not in out and "mod ansi;" in out)
@@ -508,8 +512,9 @@ def less_keys(tmp, n100):
     edited = os.path.join(tmp, "edit-me.txt")
     with open(edited, "w") as f:
         f.write("".join(f"{i}\n" for i in range(1, 31)))
-    # WAIT: a freshly written script can take a moment to start the first time.
-    out, code, snaps = run(f"{BIN} {edited}", ["1", "5", "g", "v", "WAIT", "G", "q"], rows=10, cols=40, env={"EDITOR": fake})
+    # Wait for the pager to be back (a fresh script can be slow to start).
+    keys = ["1", "5", "g", "v", ("SHOWN", "--More--"), "G", "q"]
+    out, code, snaps = run(f"{BIN} {edited}", keys, rows=10, cols=40, env={"EDITOR": fake})
     args = open(record).read().strip() if os.path.exists(record) else ""
     check("v runs the editor at the current line", args == f"+15 {edited}", args)
     handover = snaps[5][len(snaps[3]):].decode(errors="replace")
@@ -543,7 +548,7 @@ def reading_documents(tmp):
         with open(log, "w") as f:
             f.write("second version\n")
 
-    out, code, snaps = run(f"{BIN} --watch --always-page {log}", [change, "WAIT", "q"], rows=10, cols=40)
+    out, code, snaps = run(f"{BIN} --watch --always-page {log}", [change, ("SHOWN", "second version"), "q"], rows=10, cols=40)
     check("--watch shows the file after it changes", "second version" in snaps[2][len(snaps[0]):].decode(errors="replace"))
     check("--watch is shown in the status line", "[watching]" in out)
 
@@ -607,7 +612,8 @@ def input_colors(tmp):
 def streaming():
     # A producer that pauses: the first lines must show before it finishes.
     slow = f"(seq 1 5; sleep 3; seq 6 40) | {BIN}"
-    out, code, snaps = run(slow, ["PAUSE", "WAIT", "WAIT", "q"], rows=10, cols=40)
+    # The percentage appears once the input has ended.
+    out, code, snaps = run(slow, ["PAUSE", ("UNTIL", "--More--("), "PAUSE", "q"], rows=10, cols=40)
     # Within about a second, well before the producer's pause ends.
     first = snaps[1].decode(errors="replace")
     check(
@@ -636,12 +642,12 @@ def streaming():
     out, code, snaps = run(f"(echo first; sleep 2; echo second) | {BIN} | cat", [], rows=10, cols=40, frame=False)
     early = snaps[0].decode(errors="replace")
     check("printing copies piped input before it ends", "first" in early and "second" not in early)
-    out, code, _ = run(f"(echo first; sleep 1; echo second) | {BIN} | cat", ["WAIT"], rows=10, cols=40)
+    out, code, _ = run(f"(echo first; sleep 1; echo second) | {BIN} | cat", [], rows=10, cols=40, frame=False)
     check("printing finishes when the input ends", "first" in out and "second" in out and code == 0)
 
     # Process substitution (a pipe given as a file name) streams the same way.
     subst = f"bash -c '{BIN} <(seq 1 5; sleep 3; seq 6 40)'"
-    out, code, snaps = run(subst, ["PAUSE", "WAIT", "WAIT", "q"], rows=10, cols=40)
+    out, code, snaps = run(subst, ["PAUSE", ("UNTIL", "--More--("), "PAUSE", "q"], rows=10, cols=40)
     first = snaps[1].decode(errors="replace")
     check(
         "<(command) is paged before it ends",
