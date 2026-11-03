@@ -689,6 +689,31 @@ def startup_timing(tmp):
     check("without a size switch, mmore exits without waiting", size == ["42 141"] and took is not None and took < 0.25, f"{size} {took}")
 
 
+def git_pager(tmp):
+    """mmore as git's pager (core.pager): long output is paged with git's colors,
+    short output is printed directly, and quitting early is fine for git."""
+    if shutil.which("git") is None:
+        print("SKIP git is not installed")
+        return
+    repo = os.path.join(tmp, "repo")
+    os.makedirs(repo)
+    git = ["git", "-C", repo, "-c", "user.email=t@example.com", "-c", "user.name=Test"]
+    subprocess.run(git + ["init", "-q"], check=True)
+    for i in range(1, 31):
+        with open(os.path.join(repo, "f.txt"), "a") as f:
+            f.write(f"line {i}\n")
+        subprocess.run(git + ["add", "f.txt"], check=True)
+        subprocess.run(git + ["commit", "-qm", f"Commit number {i}"], check=True)
+    env = {"HOME": tmp, "GIT_CONFIG_NOSYSTEM": "1"}
+    pager = f"git -C {repo} -c core.pager={BIN} -c color.ui=auto"
+    out, code, snaps = run(f"{pager} log", ["G", "q"], rows=10, cols=80, env=env)
+    first = snaps[0].decode(errors="replace")
+    check("git log is paged by mmore with git's colors", ALT_ON in first and "\x1b[33mcommit" in first and "^[" not in first)
+    check("q in git log leaves git exiting cleanly", code == 0 and "Commit number 1" in after(snaps, 0))
+    out, code, _ = run(f"{pager} log -3 --oneline", [], rows=10, cols=80, env=env, frame=False)
+    check("short git output is printed without the pager", ALT_ON not in out and "Commit number 28" in out and code == 0)
+
+
 def less_keys(tmp, n100):
     # A count before g, %, and j: go to a line, a percentage, or move N lines.
     out, code, snaps = run(f"{BIN} {n100}", ["4", "2", "g", "5", "0", "%", "q"], rows=10, cols=40)
@@ -963,6 +988,7 @@ def main():
         config_keys(tmp, n100)
         remote_documents(tmp)
         startup_timing(tmp)
+        git_pager(tmp)
         reading_documents(tmp)
         input_colors(tmp)
         streaming()

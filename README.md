@@ -252,6 +252,18 @@ plain text, unless its first line names a language (`#!/usr/bin/env python3`),
 in which case `mmore` waits for the end and highlights it. Line numbers (`-n`)
 for piped input always leave room for five digits, since its length is unknown.
 
+### As git's pager
+
+`mmore` can page git's output, with git's colors:
+
+```sh
+git config --global core.pager mmore
+```
+
+Output that fits on the screen is printed without paging (as git's default,
+`less -FRX`, does), and quitting early is fine for git. To use `mmore` for one
+command only, set `GIT_PAGER=mmore`.
+
 ## Documents on the web
 
 A web address (`http://` or `https://`) is fetched and shown like a file, using
