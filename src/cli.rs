@@ -284,6 +284,10 @@ pub struct Cli {
     #[arg(long, conflicts_with = "always_page")]
     pub no_pager: bool,
 
+    /// Leave the last screen in the terminal after quitting.
+    #[arg(short = 'X', long)]
+    pub keep_screen: bool,
+
     /// Start at the first line matching PATTERN (like +/PATTERN).
     #[arg(long, value_name = "PATTERN")]
     pub pattern: Option<String>,

@@ -142,6 +142,7 @@ followed by `&error` shows new errors only.
 | `-e`, `--exit-at-eof` | Quit when paging past the end, like classic `more` |
 | `--watch` | Reload the file whenever it changes on disk |
 | `--no-pager`, `--always-page` | Never page, or page even short input |
+| `-X`, `--keep-screen` | Leave the last screen in the terminal after quitting |
 | `--mouse` | Scroll with the mouse wheel and click links (see below) |
 | `--show-escapes` | Show escape codes in plain text (`^[[31m`) instead of their colors |
 | `--force` | Show binary files anyway |

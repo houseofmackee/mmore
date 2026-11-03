@@ -485,6 +485,9 @@ def start_commands(n100):
     check("+50 starts at line 50", "\x1b[1;1H\x1b[2K50" in snaps[0].decode(errors="replace") and code == 0)
     out, code, snaps = run(f"{BIN} --pattern 75 {n100}", ["q"], rows=10, cols=40)
     check("--pattern starts at the first match, highlighted", "\x1b[1;1H\x1b[2K\x1b[7m75" in snaps[0].decode(errors="replace"))
+    out, code, snaps = run(f"{BIN} -X {n100}", [" ", "q"], rows=10, cols=40)
+    kept = out.rsplit(ALT_OFF, 1)[-1].split()
+    check("-X leaves the last screen after quitting", kept == [str(i) for i in range(10, 19)], str(kept))
 
 
 def config_keys(tmp, n100):

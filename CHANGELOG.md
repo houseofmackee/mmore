@@ -12,6 +12,8 @@ section here, so a version can only be released once it has one.
 - `+LINE`, `+G`, `+/PATTERN`, and `+?PATTERN` on the command line start at a line,
   the end, the first match, or the last match, as in `less` and `more`;
   `--pattern PATTERN` is the same as `+/PATTERN`.
+- `-X` (`--keep-screen`) leaves the last screen in the terminal after quitting,
+  so it stays in view and in the scrollback.
 
 ### Changed
 

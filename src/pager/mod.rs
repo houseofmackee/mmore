@@ -37,6 +37,27 @@ use viewport::Viewport;
 
 /// Loads a file again after it was edited (see `v`).
 pub type Reload<'a> = &'a dyn Fn(&Path) -> Option<File>;
+/// Give the terminal back after quitting. With `--keep-screen`, the last screen
+/// is printed in the normal screen afterwards, so it stays in view.
+fn finish(mut pager: Pager, screen: Screen, opts: &Options) -> io::Result<()> {
+    drop(screen);
+    if opts.keep_screen {
+        // Laid out again for the normal screen, which can be a different size
+        // (Warp gives full-screen programs a different one).
+        if let Ok((cols, rows)) = terminal::size()
+            && (cols, rows) != (pager.cols, pager.rows)
+        {
+            pager.resize(cols, rows);
+        }
+        let mut out = io::stdout().lock();
+        for line in pager.screen_text() {
+            writeln!(out, "{line}")?;
+        }
+        out.flush()?;
+    }
+    Ok(())
+}
+
 /// Where to start, from the command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Start {
@@ -96,6 +117,8 @@ pub struct Options<'a> {
     pub fetch: Option<Fetch<'a>>,
     /// Where to start in the first file (`+120`, `+/pattern`).
     pub start: Option<&'a Start>,
+    /// Leave the last screen in the terminal after quitting (`-X`).
+    pub keep_screen: bool,
 }
 
 /// Page the document interactively until the user quits.
@@ -119,7 +142,7 @@ pub fn run(document: Document, opts: &Options) -> io::Result<()> {
     // Keys pressed while the terminal was asked about its background come first.
     for key in keys::from_bytes(&crate::background::take_typeahead()) {
         match pager.key(key) {
-            Flow::Quit => return Ok(()),
+            Flow::Quit => return finish(pager, screen, opts),
             // Suspending or editing before the first screen would be odd.
             Flow::Suspend | Flow::Edit | Flow::Continue => {}
         }
@@ -210,7 +233,7 @@ pub fn run(document: Document, opts: &Options) -> io::Result<()> {
             Some(_) => {}
         }
     }
-    Ok(())
+    finish(pager, screen, opts)
 }
 
 /// How long to wait for the first screen to be highlighted before showing it
@@ -1621,6 +1644,50 @@ impl<'a> Pager<'a> {
         status
     }
 
+    /// Row `r` of `view` as shown: with the line number gutter, search
+    /// highlighting, the selected link, and cut to the screen with `-S`.
+    fn screen_row(&self, view: &View, r: usize) -> Line {
+        let row = self.row(view, r);
+        let mut line = Line::default();
+        if view.gutter > 0 {
+            let source = view.wrapped.source[r];
+            let first = r == 0 || view.wrapped.source[r - 1] != source;
+            line.spans
+                .push(gutter_span(first.then_some(source + 1), view.gutter));
+        }
+        let ranges = view.matches.ranges.get(r).map_or(&[][..], Vec::as_slice);
+        let mut content = search::highlight(&row, ranges);
+        if let Some(link) = self.selected_link.filter(|_| self.help.is_none()) {
+            for span in &mut content.spans {
+                if span.style.link == Some(link) {
+                    span.style.reverse = !span.style.reverse;
+                }
+            }
+        }
+        if self.chop && self.help.is_none() {
+            let width = self.content_width(view.gutter);
+            line.append(slice_columns(&content, self.hscroll, width));
+        } else {
+            line.append(content);
+        }
+        line
+    }
+
+    /// The content rows on the screen now (not the status line), with escape
+    /// sequences, for `--keep-screen`.
+    fn screen_text(&self) -> Vec<String> {
+        let view = self.help.as_ref().unwrap_or(&self.view);
+        let mode = self.opts.color.max(ColorMode::Mono);
+        let links = self
+            .opts
+            .hyperlinks
+            .then_some(view.wrapped.links.as_slice());
+        let end = (view.vp.top + view.vp.height).min(view.wrapped.rows.len());
+        (view.vp.top..end)
+            .map(|r| ansi::render(&self.screen_row(view, r), mode, links))
+            .collect()
+    }
+
     /// The table of contents, as screen lines.
     fn contents_lines(&self, toc: &Toc) -> Vec<Line> {
         let width = (self.cols as usize).saturating_sub(1);
@@ -1717,29 +1784,7 @@ impl<'a> Pager<'a> {
             if r >= rows.len() {
                 continue;
             }
-            let row = self.row(view, r);
-            let mut line = Line::default();
-            if view.gutter > 0 {
-                let source = view.wrapped.source[r];
-                let first = r == 0 || view.wrapped.source[r - 1] != source;
-                line.spans
-                    .push(gutter_span(first.then_some(source + 1), view.gutter));
-            }
-            let ranges = view.matches.ranges.get(r).map_or(&[][..], Vec::as_slice);
-            let mut content = search::highlight(&row, ranges);
-            if let Some(link) = self.selected_link.filter(|_| self.help.is_none()) {
-                for span in &mut content.spans {
-                    if span.style.link == Some(link) {
-                        span.style.reverse = !span.style.reverse;
-                    }
-                }
-            }
-            if self.chop && self.help.is_none() {
-                let width = self.content_width(view.gutter);
-                line.append(slice_columns(&content, self.hscroll, width));
-            } else {
-                line.append(content);
-            }
+            let line = self.screen_row(view, r);
             queue!(out, Print(ansi::render(&line, mode, links)))?;
         }
 
@@ -1969,6 +2014,7 @@ mod tests {
         keymap: &NO_KEYS,
         fetch: None,
         start: None,
+        keep_screen: false,
     };
 
     static NO_KEYS: keys::Keymap = keys::Keymap::new();
@@ -2989,6 +3035,16 @@ mod tests {
             "{}",
             screen(&p)
         );
+    }
+
+    #[test]
+    fn screen_text_is_the_content_rows_shown() {
+        let mut p = Pager::new(doc(&[("a.txt", &numbered(100))]), &OPTS, 40, 5);
+        press(&mut p, "jj/line 5\n");
+        let text = p.screen_text();
+        assert_eq!(text.len(), 4, "the status line is left out");
+        assert_eq!(text[0], "\x1b[7mline 5\x1b[0m");
+        assert_eq!(text[3], "line 8");
     }
 
     #[test]

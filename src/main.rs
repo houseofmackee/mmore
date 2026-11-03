@@ -514,6 +514,7 @@ fn output(cli: &Cli, settings: &Settings, document: Document, view: View) -> io:
             fetch: Some(&fetch),
             keymap: &keymap,
             start: start.as_ref(),
+            keep_screen: cli.keep_screen,
         },
     )
 }
