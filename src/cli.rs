@@ -193,6 +193,10 @@ pub struct Cli {
     #[arg(short = 'S', long)]
     pub chop_long_lines: bool,
 
+    /// Columns between tab stops.
+    #[arg(short = 'x', long, value_name = "N", default_value_t = 8, value_parser = clap::value_parser!(u8).range(1..=32))]
+    pub tabs: u8,
+
     /// Syntax highlighting theme (see --list-themes).
     #[arg(long, value_name = "NAME")]
     pub theme: Option<String>,

@@ -57,6 +57,7 @@ fn run() -> ExitCode {
         }
     };
     let cli = Cli::parse_from(cli::args(&config.args));
+    render::plain::set_tab_width(cli.tabs.into());
 
     if cli.list_themes {
         return finish(list_themes());

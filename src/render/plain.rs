@@ -1,11 +1,19 @@
 //! Plain text rendering, and the tab/control-character cleanup shared by all renderers.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use unicode_width::UnicodeWidthChar;
 
 use super::escapes::Parser;
 use crate::style::Line;
 
-pub const TAB_WIDTH: usize = 8;
+/// Columns between tab stops (`--tabs`).
+static TAB_WIDTH: AtomicUsize = AtomicUsize::new(8);
+
+/// Set the distance between tab stops for all rendering.
+pub fn set_tab_width(width: usize) {
+    TAB_WIDTH.store(width.max(1), Ordering::Relaxed);
+}
 
 /// Render text into lines, expanding tabs and making control characters visible.
 pub fn render(text: &str) -> Vec<Line> {
@@ -30,6 +38,7 @@ pub fn sanitize(line: &Line) -> Line {
         return line.clone();
     }
 
+    let tab = TAB_WIDTH.load(Ordering::Relaxed);
     let mut out = Line::default();
     let mut col = 0;
     let mut buf = String::new();
@@ -38,7 +47,7 @@ pub fn sanitize(line: &Line) -> Line {
         for ch in span.text.chars() {
             match ch {
                 '\t' => {
-                    let spaces = TAB_WIDTH - (col % TAB_WIDTH);
+                    let spaces = tab - (col % tab);
                     buf.extend(std::iter::repeat_n(' ', spaces));
                     col += spaces;
                 }

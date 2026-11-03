@@ -128,6 +128,7 @@ followed by `&error` shows new errors only.
 |--------|--------|
 | `-n`, `--line-numbers` | Show source line numbers (in rendered Markdown, the line where each block starts) |
 | `-S`, `--chop-long-lines` | Cut long lines off at the screen edge instead of wrapping them |
+| `-x N`, `--tabs N` | Put tab stops every N columns (default 8) |
 | `-p`, `--plain` | Show files as plain text, without rendering or highlighting |
 | `-l`, `--language LANG` | Treat the input as `LANG`, by name or extension (`rust`, `py`, `md`) |
 | `--theme NAME` | Highlighting theme; `--list-themes` shows the choices |

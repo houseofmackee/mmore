@@ -873,3 +873,24 @@ fn config_file_errors_stop_with_the_line() {
         .success();
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn tab_stops_can_be_changed() {
+    for (args, expected) in [
+        (vec![], "a       b\n"),
+        (vec!["--tabs", "4"], "a   b\n"),
+        (vec!["-x", "2"], "a b\n"),
+    ] {
+        mmore()
+            .args(args)
+            .write_stdin("a\tb\n")
+            .assert()
+            .success()
+            .stdout(expected);
+    }
+    mmore()
+        .args(["--tabs", "0"])
+        .write_stdin("x")
+        .assert()
+        .code(2);
+}
