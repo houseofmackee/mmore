@@ -5,6 +5,8 @@ section here, so a version can only be released once it has one.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-03
+
 ### Added
 
 - GitLab (gitlab.com) and Codeberg addresses work like GitHub's: a repository or
@@ -201,7 +203,8 @@ First release.
 - Light or dark theme picked from the terminal's background.
 - Builds for macOS and Linux, and a Homebrew formula.
 
-[Unreleased]: https://github.com/houseofmackee/mmore/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/mmore/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/houseofmackee/mmore/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/houseofmackee/mmore/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/houseofmackee/mmore/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/houseofmackee/mmore/compare/v0.6.1...v0.6.2
