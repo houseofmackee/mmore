@@ -73,6 +73,7 @@ pub fn run(document: Document, opts: &Options) -> io::Result<()> {
             Flow::Suspend | Flow::Edit | Flow::Continue => {}
         }
     }
+    let mut late_replies = keys::LateReplies::default();
     let mut dirty = true;
     // Highlighted lines available at the last draw.
     let mut drawn = 0;
@@ -106,6 +107,9 @@ pub fn run(document: Document, opts: &Options) -> io::Result<()> {
                 dirty = pager.pull_stream() || highlighted || changed;
             }
             Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                if late_replies.is_reply(&key) {
+                    continue;
+                }
                 match pager.key(key) {
                     Flow::Quit => break,
                     Flow::Suspend => {

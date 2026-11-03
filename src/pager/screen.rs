@@ -77,6 +77,10 @@ fn restore() {
         let _ = out.write_all(MOUSE_OFF.as_bytes());
     }
     let _ = execute!(out, cursor::Show, terminal::LeaveAlternateScreen);
+    // Back at the start of the line. Terminals put the cursor back where it was
+    // before the alternate screen, which is there already; one that does not
+    // would leave it mid-line, and zsh would then show its `%` marker.
+    let _ = out.write_all(b"\r");
     let _ = terminal::disable_raw_mode();
     let _ = out.flush();
 }

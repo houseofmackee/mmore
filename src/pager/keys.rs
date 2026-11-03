@@ -120,6 +120,49 @@ pub fn map(key: KeyEvent) -> Action {
     }
 }
 
+/// Drops terminal replies that arrive as keys. The background color query gives
+/// up after a short wait; a terminal that answers later sends `ESC ] 11 ; rgb:...
+/// ESC \` into the pager, which reads as Alt-], text, and Alt-\ (or Ctrl-G for a
+/// BEL ending). Without this, `r`, `g`, `b`, `:`, and `/` in it would act as keys.
+#[derive(Debug, Default)]
+pub struct LateReplies {
+    /// Inside a reply: how many characters of it have been dropped.
+    inside: Option<usize>,
+}
+
+impl LateReplies {
+    /// Whether `key` is part of a late reply (and must be ignored).
+    pub fn is_reply(&mut self, key: &KeyEvent) -> bool {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let plain = (key.modifiers - KeyModifiers::SHIFT).is_empty();
+        match (self.inside, key.code) {
+            (None, KeyCode::Char(']')) if alt => {
+                self.inside = Some(0);
+                true
+            }
+            (None, _) => false,
+            (Some(_), KeyCode::Char('\\')) if alt => {
+                self.inside = None;
+                true
+            }
+            (Some(_), KeyCode::Char('g')) if ctrl => {
+                self.inside = None;
+                true
+            }
+            // Replies are short printable text; anything else is a real key.
+            (Some(n), KeyCode::Char(c)) if plain && c.is_ascii_graphic() && n < 256 => {
+                self.inside = Some(n + 1);
+                true
+            }
+            (Some(_), _) => {
+                self.inside = None;
+                false
+            }
+        }
+    }
+}
+
 /// Key presses from raw terminal input that was read before the pager started
 /// (see `background::take_typeahead`). Covers what people type quickly: text,
 /// Enter, Backspace, Ctrl-letters, arrows, Home/End, and Page Up/Down.
@@ -228,6 +271,32 @@ mod tests {
         assert_eq!(map(key(KeyCode::Tab)), Action::NextLink);
         assert_eq!(map(key(KeyCode::BackTab)), Action::PrevLink);
         assert_eq!(map(key(KeyCode::Backspace)), Action::Back);
+    }
+
+    #[test]
+    fn late_terminal_replies_are_dropped() {
+        let alt = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT);
+        let mut late = LateReplies::default();
+        let mut reply = vec![alt(']')];
+        reply.extend(
+            "11;rgb:0b0b/1010/2020"
+                .chars()
+                .map(|c| key(KeyCode::Char(c))),
+        );
+        reply.push(alt('\\'));
+        assert!(reply.iter().all(|k| late.is_reply(k)));
+        // Keys after the reply count again, and so do keys without one.
+        assert!(!late.is_reply(&key(KeyCode::Char('q'))));
+        assert!(!late.is_reply(&key(KeyCode::Char('r'))));
+        // A BEL ending, then a real key.
+        assert!(late.is_reply(&alt(']')));
+        assert!(late.is_reply(&key(KeyCode::Char('1'))));
+        assert!(late.is_reply(&ctrl('g')));
+        assert!(!late.is_reply(&ctrl('g')));
+        // A key that cannot be in a reply ends it and is kept.
+        assert!(late.is_reply(&alt(']')));
+        assert!(!late.is_reply(&key(KeyCode::Enter)));
+        assert!(!late.is_reply(&key(KeyCode::Char('q'))));
     }
 
     #[test]

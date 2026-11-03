@@ -5,6 +5,15 @@ section here, so a version can only be released once it has one.
 
 ## [Unreleased]
 
+### Fixed
+
+- A stray `%` could appear in zsh after quitting, in terminals that do not put
+  the cursor back where it was when the pager screen closes. mmore now goes back
+  to the start of the line itself.
+- A terminal that answered the background color query late (after mmore had
+  stopped waiting) had its reply read as key presses, which could switch to the
+  raw view or open a search prompt that swallowed `q`. Such replies are ignored.
+
 ## [0.4.0] - 2026-11-02
 
 ### Added

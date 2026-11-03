@@ -67,6 +67,7 @@ def finish(pid, fd, out=b""):
     on macOS cannot exit while its terminal output is unread). Kills the process
     group after RUN_TIMEOUT. Returns (exit code or None if killed, output)."""
     deadline = time.time() + RUN_TIMEOUT
+    killed = False
     while True:
         r, _, _ = select.select([fd], [], [], 0.05)
         if r:
@@ -76,14 +77,14 @@ def finish(pid, fd, out=b""):
                 pass
         done, status = os.waitpid(pid, os.WNOHANG)
         if done:
-            return os.waitstatus_to_exitcode(status), out
-        if time.time() > deadline:
+            return (None if killed else os.waitstatus_to_exitcode(status)), out
+        if time.time() > deadline and not killed:
+            # Killed, it still has to exit, so keep reading until it has.
             try:
                 os.killpg(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            os.waitpid(pid, 0)
-            return None, out
+            killed = True
 
 
 def spawn(cmd, env, rows, cols):
@@ -261,7 +262,8 @@ def quit_while_reading(cmd, ready, rows=10, cols=40):
         os.killpg(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    os.waitpid(pid, 0)
+    # Keep reading while it exits: unread output would keep it from exiting.
+    finish(pid, fd, out)
     return took
 
 
@@ -439,6 +441,34 @@ def background():
     check("terminal is back in canonical mode afterwards", b"-icanon" not in out and b"icanon" in out)
     out, _ = answering_terminal(light, {"NO_COLOR": "1"})
     check("no background query without colors", b"\x1b]11;?" not in out)
+
+    # A reply that comes after the query gave up arrives while paging. It must
+    # not act as keys (its "r", "g", "b", ":", and "/" would), and q still quits.
+    pid, fd = spawn(f"{BIN} {MD}", clean_env(), 10, 80)
+    out = b""
+    start = time.time()
+    replied = quit_sent = False
+    while time.time() - start < START_WAIT:
+        r, _, _ = select.select([fd], [], [], 0.01)
+        if r:
+            try:
+                out += os.read(fd, 65536)
+            except OSError:
+                break
+        if not replied and b"--More--" in out:
+            # The pager is running, so the query is long over.
+            os.write(fd, b"\x1b]11;rgb:0b0b/1010/2020\x1b\\\x1b[?62;22c")
+            replied, reply_at = True, time.time()
+        if replied and not quit_sent and time.time() - reply_at > 0.5:
+            os.write(fd, b"q")
+            quit_sent = True
+        if quit_sent and ALT_OFF.encode() in out:
+            break
+    code, out = finish(pid, fd, out)
+    text = out.decode(errors="replace")
+    statuses = set(re.findall(r"--More--\(\d+%\)|\[source\]|/1010", text))
+    check("a late terminal reply is not read as keys", code == 0 and len(statuses) == 1, str(sorted(statuses)))
+    check("the cursor is at the start of a line after quitting", text.endswith(ALT_OFF + "\r"), repr(text[-12:]))
 
 
 def less_keys(tmp, n100):
