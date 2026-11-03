@@ -269,9 +269,9 @@ struct Pager<'a> {
     /// When `--watch` last looked at the file.
     watched_at: std::time::Instant,
     /// Marks set with `m`: file and source line.
-    marks: std::collections::HashMap<char, (usize, usize)>,
+    marks: std::collections::HashMap<char, Place>,
     /// Where `''` goes: the place before the last jump.
-    last_place: Option<(usize, usize)>,
+    last_place: Option<Place>,
     /// While a search is being typed: how things were before, to go back to
     /// on Esc (search as you type moves the view).
     search_origin: Option<SearchOrigin>,
@@ -279,7 +279,18 @@ struct Pager<'a> {
     /// Enter follows.
     selected_link: Option<u32>,
     /// Places left by following links, for Backspace.
-    history: Vec<(usize, usize)>,
+    history: Vec<Place>,
+}
+
+/// A place to come back to (marks, `''`, and Backspace after following a link).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Place {
+    file: usize,
+    /// The source line at the top of the screen.
+    source: usize,
+    /// How many of that line's rows were above the top: long lines, and lines
+    /// with blank lines after them, take several rows.
+    rows_in: usize,
 }
 
 /// The state that search as you type changes, saved when the prompt opens.
@@ -758,9 +769,15 @@ impl<'a> Pager<'a> {
         Flow::Continue
     }
 
-    /// The current place: file and the source line at the top of the screen.
-    fn place(&self) -> (usize, usize) {
-        (self.file, self.view.anchor())
+    /// The current place, to come back to exactly.
+    fn place(&self) -> Place {
+        let source = self.view.anchor();
+        let first = self.view.wrapped.first_row_of(source);
+        Place {
+            file: self.file,
+            source,
+            rows_in: self.view.vp.top.saturating_sub(first),
+        }
     }
 
     /// Remember the current place for `''`, before a jump.
@@ -768,11 +785,16 @@ impl<'a> Pager<'a> {
         self.last_place = Some(self.place());
     }
 
-    fn go_to_place(&mut self, (file, source): (usize, usize)) {
-        if file != self.file && file < self.doc.files.len() {
-            self.switch_file(file);
+    fn go_to_place(&mut self, place: Place) {
+        if place.file != self.file && place.file < self.doc.files.len() {
+            self.switch_file(place.file);
         }
-        let row = self.view.wrapped.first_row_of(source);
+        // Back to the same row of the line, if it still has that many (after a
+        // resize it may wrap into fewer rows).
+        let wrapped = &self.view.wrapped;
+        let first = wrapped.first_row_of(place.source);
+        let next = wrapped.first_row_of(place.source + 1);
+        let row = (first + place.rows_in).min(next.saturating_sub(1).max(first));
         let vp = &mut self.view.vp;
         vp.top = row.min(vp.max_top());
     }
@@ -2673,9 +2695,7 @@ mod tests {
         press(&mut p, "\n");
         assert!(top_text(&p).contains("Later"), "{}", top_text(&p));
         press(&mut p, "\x08");
-        // Places are kept by source line, like marks.
-        assert_eq!(p.file, 0);
-        assert!(p.view.vp.top.abs_diff(at_link) <= 1);
+        assert_eq!((p.file, p.view.vp.top), (0, at_link));
         press(&mut p, "g");
 
         // Another file, at a heading; its link back reuses the open file.
@@ -2826,6 +2846,22 @@ mod tests {
         // Without --watch nothing is checked.
         assert!(!p.check_watched());
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn marks_keep_the_row_within_a_long_line() {
+        // A line that wraps into five rows at width 10, between short lines.
+        let text = format!("{}{}\n{}", numbered(3), "x".repeat(50), numbered(20));
+        let mut p = Pager::new(doc(&[("a.txt", &text)]), &OPTS, 10, 4);
+        press(&mut p, "jjjjj");
+        assert_eq!(p.view.vp.top, 5, "two rows into the long line");
+        press(&mut p, "ma");
+        press(&mut p, "G'a");
+        assert_eq!(p.view.vp.top, 5);
+        press(&mut p, "''");
+        assert_eq!(p.view.vp.top, p.view.vp.max_top(), "'' goes back to the end");
+        press(&mut p, "''");
+        assert_eq!(p.view.vp.top, 5);
     }
 
     #[test]

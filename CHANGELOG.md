@@ -10,6 +10,11 @@ section here, so a version can only be released once it has one.
 - `--tabs N` (or `-x N`, as in `less`) sets the distance between tab stops.
 - The README explains how to use mmore as git's pager.
 
+### Fixed
+
+- Marks, `''`, and Backspace after following a link go back to the exact row,
+  not to the first row of a long (wrapped) line, which could be a row or more off.
+
 ## [0.6.3] - 2026-11-03
 
 ### Fixed
