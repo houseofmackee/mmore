@@ -503,6 +503,17 @@ def remembered(tmp, n100):
     check("Up in the search prompt brings back the last search", "/42" in after(snaps, 1) and "\x1b[7m42" in after(snaps, 2))
 
 
+def header_lines(n100):
+    # --header keeps the first lines on top while paging, for files and for
+    # piped input.
+    out, code, snaps = run(f"{BIN} --header 1 {n100}", [" ", "q"], rows=10, cols=40)
+    paged = after(snaps, 0)
+    check("--header keeps the first line on top", "\x1b[1;1H\x1b[2K1" in paged and "\x1b[2;1H\x1b[2K10" in paged, repr(paged[:60]))
+    out, code, snaps = run(f"seq 1 100 | {BIN} --header 2", [" ", "q"], rows=10, cols=40)
+    paged = after(snaps, 0)
+    check("--header works for piped input", "\x1b[1;1H\x1b[2K1" in paged and "\x1b[2;1H\x1b[2K2" in paged and "\x1b[3;1H\x1b[2K10" in paged and code == 0)
+
+
 def save_and_pipe(n100):
     # | sends the lines shown (here after a filter) to a command, whose output
     # shows until Enter is pressed; then the pager comes back.
@@ -1039,6 +1050,7 @@ def main():
         start_commands(n100)
         save_and_pipe(n100)
         remembered(tmp, n100)
+        header_lines(n100)
         remote_documents(tmp)
         startup_timing(tmp)
         git_pager(tmp)

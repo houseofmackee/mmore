@@ -149,6 +149,7 @@ followed by `&error` shows new errors only.
 | `-S`, `--chop-long-lines` | Cut long lines off at the screen edge instead of wrapping them |
 | `-x N`, `--tabs N` | Put tab stops every N columns (default 8) |
 | `-s`, `--squeeze-blank` | Show runs of blank lines as one blank line |
+| `--header N` | Keep the first N lines on top while scrolling (CSV headings, `ps` output) |
 | `+LINE`, `+G`, `+/PATTERN`, `+?PATTERN` | Start at a line, the end, the first match, or the last match (in the first file) |
 | `--pattern PATTERN` | Same as `+/PATTERN` |
 | `-p`, `--plain` | Show files as plain text, without rendering or highlighting |

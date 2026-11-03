@@ -522,6 +522,7 @@ fn output(cli: &Cli, settings: &Settings, document: Document, view: View) -> io:
             start: start.as_ref(),
             keep_screen: cli.keep_screen,
             history_file: history.as_deref(),
+            header: cli.header,
         },
     )
 }

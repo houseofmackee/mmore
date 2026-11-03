@@ -314,6 +314,10 @@ pub struct Cli {
     #[arg(long, conflicts_with = "always_page")]
     pub no_pager: bool,
 
+    /// Keep the first N lines of each file at the top while scrolling.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    pub header: usize,
+
     /// Show runs of blank lines as a single blank line.
     #[arg(short = 's', long)]
     pub squeeze_blank: bool,

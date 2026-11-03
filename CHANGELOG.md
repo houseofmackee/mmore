@@ -11,6 +11,10 @@ section here, so a version can only be released once it has one.
   (in `~/.local/state/mmore/history`, or the file in `MMORE_HISTORY`); Up and
   Down in a prompt go through earlier entries, and marks work again in a later
   session, opening their file if needed.
+- `--header N` keeps the first N lines of a file at the top while the rest
+  scrolls, as `less --header` does: for CSV headings, `ps` output, and logs.
+  Filters, `-s`, and searches leave those lines alone; with `-S` they scroll
+  sideways with the rest.
 
 ## [0.8.0] - 2026-11-03
 

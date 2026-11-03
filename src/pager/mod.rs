@@ -124,6 +124,8 @@ pub struct Options<'a> {
     pub keep_screen: bool,
     /// Where searches, filters, commands, and marks are remembered.
     pub history_file: Option<&'a Path>,
+    /// How many lines at the start of each file stay at the top (`--header`).
+    pub header: usize,
 }
 
 /// Page the document interactively until the user quits.
@@ -379,6 +381,9 @@ struct Pager<'a> {
     history_pos: Option<usize>,
     /// Marks from earlier sessions in files that are not open.
     saved_marks: Vec<SavedMark>,
+    /// The pinned header lines (`--header`), shown above `view`, which then
+    /// scrolls only the rest.
+    header: Option<View>,
 }
 
 /// Ways to search, chosen with control keys in the prompt, as in less.
@@ -473,6 +478,7 @@ impl<'a> Pager<'a> {
             session: History::default(),
             history_pos: None,
             saved_marks: Vec::new(),
+            header: None,
         };
         pager.layout(0);
         if let Some(path) = opts.history_file {
@@ -556,6 +562,8 @@ impl<'a> Pager<'a> {
         let mut rendered = self.doc.render_file(self.file, width, self.raw);
         let lines = rendered.lines.len();
         let headings = std::mem::take(&mut rendered.headings);
+        // Pinned header lines are not filtered, squeezed, or searched.
+        let (pinned, rendered) = split_header(rendered, self.opts.header);
         let rendered = match &self.filter {
             Some(filter) => keep_matching(rendered, filter),
             None => rendered,
@@ -572,9 +580,25 @@ impl<'a> Pager<'a> {
             .as_ref()
             .map(|s| s.row_matches(&wrapped))
             .unwrap_or_default();
-        let mut vp = Viewport::new(wrapped.rows.len(), self.content_height());
+        // The header takes rows from the top, but leaves at least one to scroll.
+        self.header = pinned.map(|pinned| {
+            let wrapped = wrap_all(pinned, width);
+            let rows = wrapped.rows.len().min(self.content_height() - 1);
+            View {
+                vp: Viewport::new(rows, rows),
+                wrapped,
+                gutter,
+                width,
+                lines: 0,
+                headings: Vec::new(),
+                matches: RowMatches::default(),
+                ends_blank: false,
+            }
+        });
+        let height = self.content_height() - self.header_rows();
+        let mut vp = Viewport::new(wrapped.rows.len(), height);
         let top = wrapped.first_row_of(anchor);
-        vp.reset(wrapped.rows.len(), self.content_height(), top);
+        vp.reset(wrapped.rows.len(), height, top);
         self.view = View {
             wrapped,
             vp,
@@ -591,6 +615,14 @@ impl<'a> Pager<'a> {
         }
         self.stream_done = self.stream().is_none_or(Stream::is_done);
         self.cursor = None;
+    }
+
+    /// Screen rows the pinned header lines take (none while help is shown).
+    fn header_rows(&self) -> usize {
+        match (&self.header, &self.help) {
+            (Some(header), None) => header.vp.height,
+            _ => 0,
+        }
     }
 
     fn layout_help(&mut self) {
@@ -1061,11 +1093,15 @@ impl<'a> Pager<'a> {
 
     /// The link shown at screen position `column`, `row`.
     fn link_at(&self, column: usize, row: usize) -> Option<u32> {
-        let view = &self.view;
-        if row >= view.vp.height {
+        let pinned = self.header_rows();
+        let (view, r) = match &self.header {
+            Some(header) if row < pinned => (header, row),
+            _ => (&self.view, self.view.vp.top + row.checked_sub(pinned)?),
+        };
+        if r >= view.vp.top + view.vp.height {
             return None;
         }
-        let line = view.wrapped.rows.get(view.vp.top + row)?;
+        let line = view.wrapped.rows.get(r)?;
         let mut x = column.checked_sub(view.gutter)?;
         if self.chop {
             x += self.hscroll;
@@ -1745,6 +1781,12 @@ impl<'a> Pager<'a> {
         if new.is_empty() {
             return ended;
         }
+        // Lines of the pinned header still arriving: lay it all out again.
+        if self.opts.header > have {
+            let anchor = self.view.anchor();
+            self.layout(anchor);
+            return true;
+        }
         let count = new.len();
         let mut rendered = Rendered::default();
         for (i, line) in new.into_iter().enumerate() {
@@ -1939,8 +1981,16 @@ impl<'a> Pager<'a> {
             .hyperlinks
             .then_some(view.wrapped.links.as_slice());
         let end = (view.vp.top + view.vp.height).min(view.wrapped.rows.len());
-        (view.vp.top..end)
-            .map(|r| ansi::render(&self.screen_row(view, r), mode, links))
+        let pinned = self
+            .header
+            .as_ref()
+            .filter(|_| self.help.is_none())
+            .map(|header| (header, 0..header.vp.height));
+        pinned
+            .into_iter()
+            .flat_map(|(header, rows)| rows.map(move |r| (header, r)))
+            .chain((view.vp.top..end).map(|r| (view, r)))
+            .map(|(view, r)| ansi::render(&self.screen_row(view, r), mode, links))
             .collect()
     }
 
@@ -2033,9 +2083,19 @@ impl<'a> Pager<'a> {
         // Search highlighting needs reverse video even without colors.
         let mode = self.opts.color.max(ColorMode::Mono);
         let rows = &view.wrapped.rows;
+        // Pinned header lines first, then the scrolling part below them.
+        let pinned = self.header_rows();
+        if let Some(header) = self.header.as_ref().filter(|_| pinned > 0) {
+            for i in 0..pinned {
+                queue!(out, MoveTo(0, i as u16), Clear(ClearType::CurrentLine))?;
+                let line = self.screen_row(header, i);
+                queue!(out, Print(ansi::render(&line, mode, links)))?;
+            }
+        }
         for i in 0..view.vp.height {
             // Clear before printing: clearing after a full-width row would erase its last cell.
-            queue!(out, MoveTo(0, i as u16), Clear(ClearType::CurrentLine))?;
+            let at = (pinned + i) as u16;
+            queue!(out, MoveTo(0, at), Clear(ClearType::CurrentLine))?;
             let r = view.vp.top + i;
             if r >= rows.len() {
                 continue;
@@ -2046,7 +2106,7 @@ impl<'a> Pager<'a> {
 
         // Stay short of the last column so the terminal never scrolls.
         let max = (self.cols as usize).saturating_sub(1);
-        let bottom = view.vp.height as u16;
+        let bottom = (self.header_rows() + view.vp.height) as u16;
         queue!(out, MoveTo(0, bottom), Clear(ClearType::CurrentLine))?;
         let typing = match (&self.prompt, self.count) {
             (Some((kind, input)), _) => {
@@ -2107,6 +2167,31 @@ fn keep_visible(toc: &mut Toc, height: usize) {
 }
 
 /// Only the rendered lines that match `filter`, keeping their source lines.
+/// Split off the first `count` source lines (the pinned header) from the rest.
+/// `None` for no header.
+fn split_header(rendered: Rendered, count: usize) -> (Option<Rendered>, Rendered) {
+    if count == 0 {
+        return (None, rendered);
+    }
+    let mut header = Rendered {
+        links: rendered.links.clone(),
+        ..Rendered::default()
+    };
+    let mut rest = Rendered {
+        links: rendered.links,
+        headings: rendered.headings,
+        ..Rendered::default()
+    };
+    for (line, source) in rendered.lines.into_iter().zip(rendered.source) {
+        if source < count {
+            header.push(line, source);
+        } else {
+            rest.push(line, source);
+        }
+    }
+    (Some(header), rest)
+}
+
 fn keep_matching(rendered: Rendered, filter: &Search) -> Rendered {
     let mut out = Rendered {
         links: rendered.links,
@@ -2285,6 +2370,7 @@ mod tests {
         start: None,
         keep_screen: false,
         history_file: None,
+        header: 0,
     };
 
     static NO_KEYS: keys::Keymap = keys::Keymap::new();
@@ -3402,6 +3488,71 @@ mod tests {
         assert_eq!((p.file, top_text(&p)), (1, "line 30".into()));
         assert_eq!(p.doc.files.len(), 2);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn header_lines_stay_on_top() {
+        let text = format!(
+            "name,age\n{}",
+            (1..=50)
+                .map(|i| format!("row {i},{i}\n"))
+                .collect::<String>()
+        );
+        let opts = Options { header: 1, ..OPTS };
+        let mut p = Pager::new(doc(&[("people.csv", &text)]), &opts, 40, 6);
+        // The text of each screen row, from the cursor moves that start them.
+        let shown = |p: &Pager| -> Vec<String> {
+            let screen = plain_screen(p);
+            (1..=p.rows)
+                .map(|row| {
+                    let start = format!("\x1b[{row};1H\x1b[2K");
+                    screen.split(&start).nth(1).map_or(String::new(), |rest| {
+                        rest.split("\x1b[").next().unwrap_or("").to_string()
+                    })
+                })
+                .collect()
+        };
+        assert_eq!(
+            shown(&p)[..5],
+            ["name,age", "row 1,1", "row 2,2", "row 3,3", "row 4,4"]
+        );
+        press(&mut p, " ");
+        assert_eq!(shown(&p)[..2], ["name,age", "row 5,5"]);
+        press(&mut p, "G");
+        assert_eq!(
+            shown(&p)[..5],
+            [
+                "name,age",
+                "row 47,47",
+                "row 48,48",
+                "row 49,49",
+                "row 50,50"
+            ]
+        );
+        assert!(p.status().starts_with("(END)"));
+        // Filters and searches leave the header alone.
+        press(&mut p, "g&row 4\n");
+        assert_eq!(shown(&p)[..3], ["name,age", "row 4,4", "row 40,40"]);
+        press(&mut p, "&\n/name\n");
+        assert_eq!(p.message.as_deref(), Some("Pattern not found"));
+        // What -X keeps includes it.
+        assert_eq!(p.screen_text()[0], "name,age");
+        // With -S it scrolls sideways along with the rest.
+        // 000001002...: no part repeats, so a shift shows.
+        let digits: String = (0..20).map(|i| format!("{i:03}")).collect();
+        let wide = format!("{digits}\n{digits}\n");
+        let opts = Options {
+            header: 1,
+            chop: true,
+            ..OPTS
+        };
+        let mut p = Pager::new(doc(&[("wide.txt", &wide)]), &opts, 40, 6);
+        let before = shown(&p);
+        p.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let after = shown(&p);
+        assert_eq!(before[0], digits[..40]);
+        assert_ne!(after[0], before[0], "the header scrolled");
+        assert_eq!(after[0], after[1], "together with the rest");
     }
 
     #[test]
