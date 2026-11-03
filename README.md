@@ -116,7 +116,11 @@ mmore --man > ~/.local/share/man/man1/mmore.1
 Searches and filters are regular expressions. They ignore case unless the pattern
 contains an uppercase letter. While you type a search, the view already jumps to
 the first match; Enter keeps it and Esc goes back to where you were. An empty
-search pattern repeats the previous search. With several files, a search that
+search pattern repeats the previous search. As in `less`, a `!` at the start
+(`/!pattern`, `&!pattern`) looks for lines that do not match, and while typing a
+search, Ctrl-K highlights the matches without moving (the prompt shows
+`Keep-pos`) and Ctrl-R treats the pattern as plain text instead of a regular
+expression (`Regex-off`). With several files, a search that
 finds nothing more in the current file goes on to the next file with a match (or
 the previous one, going backward).
 A filter also applies to piped input as it arrives, so `tail -f app.log | mmore`

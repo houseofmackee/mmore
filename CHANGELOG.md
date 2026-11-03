@@ -16,6 +16,9 @@ section here, so a version can only be released once it has one.
   so it stays in view and in the scrollback.
 - `-s` (`--squeeze-blank`) shows runs of blank lines as one, as in `less` and
   `cat`, also when printing and for piped input as it arrives.
+- Search modifiers, as in `less`: `/!pattern` and `&!pattern` find or show the
+  lines that do not match; while typing a search, Ctrl-K only highlights the
+  matches (without moving) and Ctrl-R makes the pattern plain text.
 
 ### Changed
 

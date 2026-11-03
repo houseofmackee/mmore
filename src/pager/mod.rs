@@ -346,6 +346,17 @@ struct Pager<'a> {
     selected_link: Option<u32>,
     /// Places left by following links, for Backspace.
     history: Vec<Place>,
+    /// Modifiers typed in the search or filter prompt (Ctrl-K, Ctrl-R).
+    prompt_modifiers: PromptModifiers,
+}
+
+/// Ways to search, chosen with control keys in the prompt, as in less.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PromptModifiers {
+    /// Ctrl-K: highlight the matches but stay where you are.
+    keep: bool,
+    /// Ctrl-R: the pattern is plain text, not a regular expression.
+    literal: bool,
 }
 
 /// A place to come back to (marks, `''`, and Backspace after following a link).
@@ -426,6 +437,7 @@ impl<'a> Pager<'a> {
             search_origin: None,
             selected_link: None,
             history: Vec::new(),
+            prompt_modifiers: PromptModifiers::default(),
         };
         pager.layout(0);
         pager
@@ -607,6 +619,7 @@ impl<'a> Pager<'a> {
                     matches: self.view.matches.clone(),
                     cursor: self.cursor,
                 });
+                self.prompt_modifiers = PromptModifiers::default();
                 self.prompt = Some((PromptKind::Search { backward }, String::new()));
             }
             Action::Command => self.prompt = Some((PromptKind::Command, String::new())),
@@ -669,7 +682,10 @@ impl<'a> Pager<'a> {
                 }
             }
             Action::Edit => return Flow::Edit,
-            Action::Filter => self.prompt = Some((PromptKind::Filter, String::new())),
+            Action::Filter => {
+                self.prompt_modifiers = PromptModifiers::default();
+                self.prompt = Some((PromptKind::Filter, String::new()));
+            }
             Action::NextHeading => self.next_heading(true),
             Action::PrevHeading => self.next_heading(false),
             Action::Contents => self.open_contents(),
@@ -742,6 +758,18 @@ impl<'a> Pager<'a> {
                 self.preview_search(kind, "");
                 self.prompt = Some((kind, String::new()));
             }
+            KeyCode::Char('k') if ctrl && matches!(kind, PromptKind::Search { .. }) => {
+                self.prompt_modifiers.keep = !self.prompt_modifiers.keep;
+                self.preview_search(kind, &input);
+                self.prompt = Some((kind, input));
+            }
+            KeyCode::Char('r')
+                if ctrl && matches!(kind, PromptKind::Search { .. } | PromptKind::Filter) =>
+            {
+                self.prompt_modifiers.literal = !self.prompt_modifiers.literal;
+                self.preview_search(kind, &input);
+                self.prompt = Some((kind, input));
+            }
             KeyCode::Backspace => {
                 // Backspace on an empty prompt cancels it, as in less.
                 if input.pop().is_some() {
@@ -791,7 +819,7 @@ impl<'a> Pager<'a> {
             return;
         };
         let (top, hscroll) = (origin.top, origin.hscroll);
-        let search = match Search::new(input, backward) {
+        let search = match Search::with(input, backward, self.prompt_modifiers.literal) {
             Ok(search) if !input.is_empty() => search,
             Ok(_) => {
                 self.view.matches = origin.matches.clone();
@@ -803,6 +831,12 @@ impl<'a> Pager<'a> {
             Err(_) => return,
         };
         self.view.matches = search.row_matches(&self.view.wrapped);
+        // Ctrl-K: highlight only, without moving.
+        if self.prompt_modifiers.keep {
+            self.view.vp.top = top;
+            self.hscroll = hscroll;
+            return;
+        }
         let found = search::find(&self.view.matches.starts, top, !backward, !backward);
         let vp = &mut self.view.vp;
         match found {
@@ -1246,7 +1280,8 @@ impl<'a> Pager<'a> {
             self.layout(anchor);
             return;
         }
-        match Search::new(input, false) {
+        let literal = std::mem::take(&mut self.prompt_modifiers).literal;
+        match Search::with(input, false, literal) {
             Ok(filter) => {
                 self.filter = Some(filter);
                 self.layout(anchor);
@@ -1336,16 +1371,22 @@ impl<'a> Pager<'a> {
 
     fn start_search(&mut self, input: &str, backward: bool) {
         // An empty pattern repeats the previous one, as in less.
-        let pattern = match (input.is_empty(), &self.search) {
-            (true, Some(previous)) => previous.pattern.clone(),
+        // (With the same modifiers.)
+        let modifiers = std::mem::take(&mut self.prompt_modifiers);
+        let (pattern, literal) = match (input.is_empty(), &self.search) {
+            (true, Some(previous)) => (previous.pattern.clone(), previous.literal),
             (true, None) => return,
-            (false, _) => input.to_string(),
+            (false, _) => (input.to_string(), modifiers.literal),
         };
-        match Search::new(&pattern, backward) {
+        match Search::with(&pattern, backward, literal) {
             Ok(search) => {
                 self.view.matches = search.row_matches(&self.view.wrapped);
                 self.search = Some(search);
                 self.cursor = None;
+                // Ctrl-K: only highlight.
+                if modifiers.keep {
+                    return;
+                }
                 self.remember_place();
                 self.jump(!backward, true);
             }
@@ -1814,7 +1855,16 @@ impl<'a> Pager<'a> {
                     PromptKind::Mark { set: true } => "m",
                     PromptKind::Mark { set: false } => "'",
                 };
-                Some(format!("{prefix}{input}"))
+                let mut modifiers = String::new();
+                if matches!(kind, PromptKind::Search { .. } | PromptKind::Filter) {
+                    if self.prompt_modifiers.keep {
+                        modifiers.push_str("Keep-pos ");
+                    }
+                    if self.prompt_modifiers.literal {
+                        modifiers.push_str("Regex-off ");
+                    }
+                }
+                Some(format!("{modifiers}{prefix}{input}"))
             }
             (None, Some(count)) => Some(count.to_string()),
             (None, None) => None,
@@ -3049,6 +3099,68 @@ mod tests {
             "{}",
             screen(&p)
         );
+    }
+
+    fn ctrl(p: &mut Pager, c: char) {
+        p.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn search_modifiers() {
+        let text = numbered(30);
+        // !pattern: lines that do not match.
+        let mut p = Pager::new(doc(&[("a.txt", &text)]), &OPTS, 40, 5);
+        press(&mut p, "/!line 1\n");
+        assert_eq!(top_text(&p), "line 2");
+        press(&mut p, "nnnnnnnn");
+        assert_eq!(top_text(&p), "line 20", "line 10 to 19 match 'line 1'");
+        press(&mut p, "g&!line 1\n");
+        assert!(
+            p.status().contains("[&!line 1: 19 lines]"),
+            "{}",
+            p.status()
+        );
+
+        // Ctrl-K: highlight without moving; n goes to the match afterwards.
+        let mut p = Pager::new(doc(&[("a.txt", &text)]), &OPTS, 40, 5);
+        press(&mut p, "/");
+        ctrl(&mut p, 'k');
+        press(&mut p, "line 20");
+        assert!(screen(&p).contains("Keep-pos /line 20"));
+        assert_eq!(top_text(&p), "line 1", "no move while typing either");
+        press(&mut p, "\n");
+        assert_eq!(top_text(&p), "line 1");
+        assert!(p.view.matches.starts[19]);
+        press(&mut p, "n");
+        assert_eq!(top_text(&p), "line 20");
+
+        // Ctrl-R: plain text, not a regular expression (also for &).
+        let dots = "a.b\naxb\na.b again\n";
+        let mut p = Pager::new(doc(&[("a.txt", dots)]), &OPTS, 40, 10);
+        press(&mut p, "/");
+        ctrl(&mut p, 'r');
+        assert!(screen(&p).contains("Regex-off /"));
+        press(&mut p, "a.b\n");
+        let found = p.view.matches.starts.iter().filter(|s| **s).count();
+        assert_eq!(found, 2, "axb does not match");
+        // An empty pattern repeats the search the same way.
+        press(&mut p, "g/\n");
+        assert_eq!(p.view.matches.starts.iter().filter(|s| **s).count(), 2);
+        press(&mut p, "&");
+        ctrl(&mut p, 'r');
+        press(&mut p, "a.b\n");
+        assert!(p.status().contains("2 lines"), "{}", p.status());
+        // The modifiers do not carry over to the next prompt.
+        press(&mut p, "&\n/a.b\n");
+        assert_eq!(p.view.matches.starts.iter().filter(|s| **s).count(), 3);
+    }
+
+    #[test]
+    fn inverted_search_finds_blank_lines() {
+        let mut p = Pager::new(doc(&[("a.txt", "x\nx\n\nx\n")]), &OPTS, 40, 10);
+        press(&mut p, "/!x\n");
+        assert!(p.view.matches.starts[2]);
+        assert_eq!(p.view.matches.starts.iter().filter(|s| **s).count(), 1);
     }
 
     #[test]

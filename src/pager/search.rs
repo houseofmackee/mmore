@@ -13,9 +13,14 @@ use crate::wrap::Wrapped;
 #[derive(Clone)]
 pub struct Search {
     regex: Regex,
+    /// The pattern as typed (with a leading `!` for lines that do not match).
     pub pattern: String,
     /// Started with `?`: `n` goes up and `N` goes down.
     pub backward: bool,
+    /// `!pattern`: lines that do *not* match.
+    pub invert: bool,
+    /// The pattern is plain text, not a regular expression (Ctrl-R).
+    pub literal: bool,
 }
 
 /// Matches mapped onto wrapped rows.
@@ -28,10 +33,30 @@ pub struct RowMatches {
 }
 
 impl Search {
-    /// Smart case: case-insensitive unless the pattern has an uppercase letter.
+    /// A regular expression search (see `with`).
+    #[cfg(test)]
     pub fn new(pattern: &str, backward: bool) -> Result<Search, String> {
+        Search::with(pattern, backward, false)
+    }
+
+    /// A search for `input` as typed: a leading `!` looks for lines that do not
+    /// match (as in less), and with `literal` the rest is plain text. Smart
+    /// case: case-insensitive unless the pattern has an uppercase letter.
+    pub fn with(input: &str, backward: bool, literal: bool) -> Result<Search, String> {
+        let (invert, pattern) = match input.strip_prefix('!') {
+            Some(rest) => (true, rest),
+            None => (false, input),
+        };
+        if invert && pattern.is_empty() {
+            return Err("Type a pattern after !".into());
+        }
         let insensitive = !pattern.chars().any(char::is_uppercase);
-        let regex = RegexBuilder::new(pattern)
+        let source = if literal {
+            regex::escape(pattern)
+        } else {
+            pattern.to_string()
+        };
+        let regex = RegexBuilder::new(&source)
             .case_insensitive(insensitive)
             .build()
             .map_err(|e| {
@@ -41,14 +66,17 @@ impl Search {
             })?;
         Ok(Search {
             regex,
-            pattern: pattern.to_string(),
+            pattern: input.to_string(),
             backward,
+            invert,
+            literal,
         })
     }
 
-    /// Whether `text` contains a match (for the `&` filter).
+    /// Whether the line `text` is one this search looks for (for the `&` filter
+    /// and for searching other files): it matches, or with `!` it does not.
     pub fn is_match(&self, text: &str) -> bool {
-        self.regex.is_match(text)
+        self.regex.is_match(text) != self.invert
     }
 
     /// Non-empty matches in `text`, as character ranges.
@@ -81,7 +109,17 @@ impl Search {
             text.push_str(&line.text());
             let last = wrapped.line.get(row + 1) != Some(&wrapped.line[row]);
             if last {
-                per_line.push(self.line_matches(&text));
+                per_line.push(if self.invert {
+                    // A line that does not match is found as a whole, at its
+                    // start; there is nothing in it to highlight.
+                    if self.regex.is_match(&text) {
+                        Vec::new()
+                    } else {
+                        std::iter::once(0..0).collect()
+                    }
+                } else {
+                    self.line_matches(&text)
+                });
                 text.clear();
             }
         }
@@ -102,9 +140,13 @@ impl Search {
                 .map(|m| m.start.max(start) - start..m.end.min(end) - start)
                 .collect();
             result.ranges.push(ranges);
-            result
-                .starts
-                .push(matches.iter().any(|m| m.start >= start && m.start < end));
+            // A match starts in this row; an empty row (a blank line) can only be
+            // found as a whole, by a `!` search.
+            result.starts.push(
+                matches
+                    .iter()
+                    .any(|m| m.start >= start && (m.start < end || m.start == start)),
+            );
         }
         result
     }

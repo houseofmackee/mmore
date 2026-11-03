@@ -30,6 +30,11 @@ pub const KEYS: &[(&str, &str)] = &[
         "Search forward (regex; case-insensitive if all lowercase)",
     ),
     ("?pattern", "Search backward"),
+    ("/!pattern  &!pattern", "Lines that do not match"),
+    (
+        "Ctrl-K  Ctrl-R",
+        "While typing a search: only highlight / plain text, not regex",
+    ),
     ("n  N", "Next / previous match (on into the other files)"),
     ("]  [", "Next / previous heading (Markdown)"),
     (
