@@ -286,8 +286,8 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
 /// A document from the web, fetched whole. Its file name (`guide.md`) decides
 /// how it is shown; links in it are resolved against its address.
 fn remote_file(cli: &Cli, settings: &Settings, url: &str) -> Result<File, String> {
-    let target = remote::Target::of(url);
-    let bytes = remote::fetch(&target)?;
+    let mut target = remote::Target::of(url);
+    let bytes = remote::fetch(&mut target)?;
     if source::looks_binary(&bytes) && !cli.force {
         return Err("not a text file (use --force to show it anyway)".into());
     }

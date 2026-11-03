@@ -5,6 +5,12 @@ section here, so a version can only be released once it has one.
 
 ## [Unreleased]
 
+### Added
+
+- GitLab (gitlab.com) and Codeberg addresses work like GitHub's: a repository or
+  folder shows its README, a file page shows the file, and relative links lead
+  to the repository's other files.
+
 ## [0.7.0] - 2026-11-03
 
 ### Added

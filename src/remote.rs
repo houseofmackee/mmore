@@ -1,9 +1,9 @@
 //! Documents on the web (`mmore https://...`), fetched with `curl`.
 //!
-//! GitHub pages are fetched as the files behind them: a repository
-//! (`https://github.com/owner/repo`) shows its README, and a file page
-//! (`.../blob/main/docs/guide.md`) the file itself, so relative links in them
-//! lead to the other files of the repository.
+//! GitHub, GitLab (gitlab.com), and Codeberg pages are fetched as the files
+//! behind them: a repository (`https://github.com/owner/repo`) or folder shows
+//! its README, and a file page (`.../blob/main/docs/guide.md`) the file itself,
+//! so relative links in them lead to the other files of the repository.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -30,18 +30,50 @@ pub struct Target {
     pub base: String,
     /// A file name that tells what the document is (`README.md`).
     pub detect: PathBuf,
+    /// The README's name must be looked up first (GitLab, Codeberg).
+    pub lookup: Option<Lookup>,
+}
+
+/// How to find out which file a folder's README is.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Lookup {
+    /// GitLab's project information, which has a `readme_url`.
+    GitLabProject { api: String },
+    /// A list of the folder's files (JSON with `name`s), and where the raw
+    /// files of that folder are.
+    Files { api: String, raw_dir: String },
 }
 
 impl Target {
     pub fn of(url: &str) -> Target {
-        if let Some(target) = github(url) {
+        if let Some(target) = github(url)
+            .or_else(|| gitlab(url))
+            .or_else(|| codeberg(url))
+        {
             return target;
         }
+        Target::plain(url.to_string())
+    }
+
+    /// The address itself, judged by its file name.
+    fn plain(url: String) -> Target {
         Target {
-            fetch: url.to_string(),
+            detect: PathBuf::from(file_name(&url)),
+            base: url.clone(),
+            fetch: url,
             raw: false,
-            base: url.to_string(),
-            detect: PathBuf::from(file_name(url)),
+            lookup: None,
+        }
+    }
+
+    /// A folder's README, whose name is looked up first.
+    fn readme(lookup: Lookup, base: String) -> Target {
+        Target {
+            fetch: String::new(),
+            raw: false,
+            base,
+            detect: PathBuf::from("README.md"),
+            lookup: Some(lookup),
         }
     }
 }
@@ -61,6 +93,7 @@ fn github(url: &str) -> Option<Target> {
                 raw: true,
                 base: format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/"),
                 detect: PathBuf::from("README.md"),
+                lookup: None,
             })
         }
         [owner, repo, "blob", path @ ..] if !path.is_empty() => {
@@ -73,6 +106,7 @@ fn github(url: &str) -> Option<Target> {
                 raw: false,
                 detect: PathBuf::from(path[path.len() - 1]),
                 base: raw,
+                lookup: None,
             })
         }
         [owner, repo, "tree", reference, dir @ ..] => {
@@ -91,10 +125,213 @@ fn github(url: &str) -> Option<Target> {
                     "https://raw.githubusercontent.com/{owner}/{repo}/{reference}{suffix}/"
                 ),
                 detect: PathBuf::from("README.md"),
+                lookup: None,
             })
         }
         _ => None,
     }
+}
+
+/// The parts of the path after `prefix` (a site), without query, fragment, or
+/// trailing slash.
+fn site_path<'a>(url: &'a str, host: &str) -> Option<Vec<&'a str>> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?
+        .strip_prefix(host)?
+        .strip_prefix('/')?;
+    let rest = rest.split(['#', '?']).next().unwrap_or("");
+    let parts: Vec<&str> = rest.trim_end_matches('/').split('/').collect();
+    (parts.len() >= 2 && parts.iter().all(|p| !p.is_empty())).then_some(parts)
+}
+
+/// GitLab (gitlab.com) projects, which can be in nested groups: the project's
+/// README, a file (`/-/blob/REF/path`), or a folder's README (`/-/tree/REF/dir`).
+fn gitlab(url: &str) -> Option<Target> {
+    let parts = site_path(url, "gitlab.com")?;
+    let dash = parts.iter().position(|p| *p == "-");
+    let project = parts[..dash.unwrap_or(parts.len())].join("/");
+    let project = project.trim_end_matches(".git").to_string();
+    let api = format!(
+        "https://gitlab.com/api/v4/projects/{}",
+        project.replace('/', "%2F")
+    );
+    let Some(dash) = dash else {
+        let base = format!("https://gitlab.com/{project}/-/raw/HEAD/");
+        return Some(Target::readme(Lookup::GitLabProject { api }, base));
+    };
+    match &parts[dash + 1..] {
+        ["blob", reference, path @ ..] if !path.is_empty() => Some(Target::plain(format!(
+            "https://gitlab.com/{project}/-/raw/{reference}/{}",
+            path.join("/")
+        ))),
+        ["tree", reference, dir @ ..] => {
+            let dir = dir.join("/");
+            let raw_dir = format!(
+                "https://gitlab.com/{project}/-/raw/{reference}/{}",
+                if dir.is_empty() {
+                    String::new()
+                } else {
+                    format!("{dir}/")
+                }
+            );
+            let api = format!("{api}/repository/tree?path={dir}&ref={reference}");
+            Some(Target::readme(
+                Lookup::Files {
+                    api,
+                    raw_dir: raw_dir.clone(),
+                },
+                raw_dir,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Codeberg (Forgejo) repositories: the README, a file
+/// (`/src/branch/REF/path`, also `tag` and `commit`), or a folder's README.
+/// Whether a `/src/` path is a file or a folder is judged by a dot in its name.
+fn codeberg(url: &str) -> Option<Target> {
+    let parts = site_path(url, "codeberg.org")?;
+    let (owner, repo) = (parts[0], parts[1].trim_end_matches(".git"));
+    let api = format!("https://codeberg.org/api/v1/repos/{owner}/{repo}/contents");
+    let site = format!("https://codeberg.org/{owner}/{repo}");
+    match &parts[2..] {
+        [] => {
+            let raw_dir = format!("{site}/raw/HEAD/");
+            Some(Target::readme(
+                Lookup::Files {
+                    api,
+                    raw_dir: raw_dir.clone(),
+                },
+                raw_dir,
+            ))
+        }
+        [
+            "src",
+            kind @ ("branch" | "tag" | "commit"),
+            reference,
+            path @ ..,
+        ] => {
+            let path = path.join("/");
+            let is_file = path
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.contains('.'));
+            if is_file {
+                return Some(Target::plain(format!(
+                    "{site}/raw/{kind}/{reference}/{path}"
+                )));
+            }
+            let raw_dir = format!(
+                "{site}/raw/{kind}/{reference}/{}",
+                if path.is_empty() {
+                    String::new()
+                } else {
+                    format!("{path}/")
+                }
+            );
+            let api = if path.is_empty() {
+                format!("{api}?ref={reference}")
+            } else {
+                format!("{api}/{path}?ref={reference}")
+            };
+            Some(Target::readme(
+                Lookup::Files {
+                    api,
+                    raw_dir: raw_dir.clone(),
+                },
+                raw_dir,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The string values of `key` in JSON text, in order. Enough for the simple,
+/// flat answers of the GitLab and Forgejo APIs.
+fn json_strings(json: &str, key: &str) -> Vec<String> {
+    let needle = format!("\"{key}\"");
+    let mut values = Vec::new();
+    let mut rest = json;
+    while let Some(i) = rest.find(&needle) {
+        rest = rest[i + needle.len()..].trim_start();
+        let Some(after) = rest.strip_prefix(':').map(str::trim_start) else {
+            continue;
+        };
+        let Some(body) = after.strip_prefix('"') else {
+            rest = after;
+            continue;
+        };
+        let mut value = String::new();
+        let mut chars = body.char_indices();
+        let mut end = body.len();
+        while let Some((at, c)) = chars.next() {
+            match c {
+                '"' => {
+                    end = at + 1;
+                    break;
+                }
+                '\\' => match chars.next() {
+                    Some((_, 'n')) => value.push('\n'),
+                    Some((_, 't')) => value.push('\t'),
+                    Some((_, other)) => value.push(other),
+                    None => {}
+                },
+                c => value.push(c),
+            }
+        }
+        values.push(value);
+        rest = &body[end.min(body.len())..];
+    }
+    values
+}
+
+/// Which of a folder's files is its README: `README.md` if there is one,
+/// then another Markdown README, then any README.
+fn pick_readme(names: &[String]) -> Option<&str> {
+    let lower = |n: &String| n.to_ascii_lowercase();
+    names
+        .iter()
+        .find(|n| lower(n) == "readme.md")
+        .or_else(|| {
+            names.iter().find(|n| {
+                let n = lower(n);
+                n.starts_with("readme.") && (n.ends_with(".md") || n.ends_with(".markdown"))
+            })
+        })
+        .or_else(|| names.iter().find(|n| lower(n).starts_with("readme")))
+        .map(String::as_str)
+}
+
+/// Find the README's name (for a `lookup`), so `target` points at the file.
+fn look_up(target: &mut Target) -> Result<(), String> {
+    let Some(lookup) = target.lookup.take() else {
+        return Ok(());
+    };
+    match lookup {
+        Lookup::GitLabProject { api } => {
+            let json = String::from_utf8_lossy(&download(&api, false)?).into_owned();
+            let readme = json_strings(&json, "readme_url")
+                .into_iter()
+                .next()
+                .filter(|u| !u.is_empty())
+                .ok_or("the project has no README")?;
+            let raw = readme.replacen("/-/blob/", "/-/raw/", 1);
+            target.detect = PathBuf::from(file_name(&raw));
+            target.base = raw.clone();
+            target.fetch = raw;
+        }
+        Lookup::Files { api, raw_dir } => {
+            let json = String::from_utf8_lossy(&download(&api, false)?).into_owned();
+            let names = json_strings(&json, "name");
+            let name = pick_readme(&names).ok_or("there is no README here")?;
+            target.detect = PathBuf::from(name);
+            target.fetch = format!("{raw_dir}{name}");
+            target.base = raw_dir;
+        }
+    }
+    Ok(())
 }
 
 /// The last part of the address's path (`guide.md`), without query or fragment.
@@ -104,19 +341,26 @@ fn file_name(url: &str) -> &str {
     after_host.rsplit('/').next().unwrap_or("")
 }
 
-/// Download `target`. Errors are curl's message, or a note that curl is missing.
-pub fn fetch(target: &Target) -> Result<Vec<u8>, String> {
+/// Download `target` (looking up a README's name first, if needed; `target` is
+/// updated to point at the file). Errors are curl's message, or a note that
+/// curl is missing.
+pub fn fetch(target: &mut Target) -> Result<Vec<u8>, String> {
+    look_up(target)?;
+    download(&target.fetch, target.raw)
+}
+
+fn download(url: &str, raw: bool) -> Result<Vec<u8>, String> {
     let mut cmd = Command::new("curl");
     cmd.args(["--fail", "--silent", "--show-error", "--location"])
         // Only the web: no file:// or other schemes, not even by redirection.
         .args(["--proto", "=http,https", "--proto-redir", "=http,https"])
         .args(["--max-time", MAX_SECONDS, "--max-filesize", MAX_BYTES])
         .args(["--user-agent", concat!("mmore/", env!("CARGO_PKG_VERSION"))]);
-    if target.raw {
+    if raw {
         cmd.args(["--header", "Accept: application/vnd.github.raw"]);
     }
     let output = cmd
-        .arg(&target.fetch)
+        .arg(url)
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("needs the curl command to fetch it ({e})"))?;
@@ -236,6 +480,80 @@ mod tests {
             Target::of("https://github.com/o/r/issues/1").fetch,
             "https://github.com/o/r/issues/1"
         );
+    }
+
+    #[test]
+    fn gitlab_and_codeberg_pages_become_their_files() {
+        let repo = Target::of("https://gitlab.com/group/sub/project");
+        assert_eq!(
+            repo.lookup,
+            Some(Lookup::GitLabProject {
+                api: "https://gitlab.com/api/v4/projects/group%2Fsub%2Fproject".into()
+            })
+        );
+        let file = Target::of("https://gitlab.com/group/project/-/blob/main/docs/a.md");
+        assert_eq!(
+            file.fetch,
+            "https://gitlab.com/group/project/-/raw/main/docs/a.md"
+        );
+        assert_eq!(file.detect, PathBuf::from("a.md"));
+        assert_eq!(file.lookup, None);
+        let tree = Target::of("https://gitlab.com/g/p/-/tree/v2/docs");
+        assert_eq!(
+            tree.lookup,
+            Some(Lookup::Files {
+                api: "https://gitlab.com/api/v4/projects/g%2Fp/repository/tree?path=docs&ref=v2"
+                    .into(),
+                raw_dir: "https://gitlab.com/g/p/-/raw/v2/docs/".into()
+            })
+        );
+        let repo = Target::of("https://codeberg.org/o/r/");
+        assert_eq!(
+            repo.lookup,
+            Some(Lookup::Files {
+                api: "https://codeberg.org/api/v1/repos/o/r/contents".into(),
+                raw_dir: "https://codeberg.org/o/r/raw/HEAD/".into()
+            })
+        );
+        let file = Target::of("https://codeberg.org/o/r/src/tag/v1/docs/guide.md");
+        assert_eq!(
+            file.fetch,
+            "https://codeberg.org/o/r/raw/tag/v1/docs/guide.md"
+        );
+        let dir = Target::of("https://codeberg.org/o/r/src/branch/main/docs");
+        assert_eq!(
+            dir.lookup,
+            Some(Lookup::Files {
+                api: "https://codeberg.org/api/v1/repos/o/r/contents/docs?ref=main".into(),
+                raw_dir: "https://codeberg.org/o/r/raw/branch/main/docs/".into()
+            })
+        );
+        // Other pages of those sites are fetched as they are.
+        assert_eq!(
+            Target::of("https://codeberg.org/o/r/issues").fetch,
+            "https://codeberg.org/o/r/issues"
+        );
+        assert_eq!(
+            Target::of("https://gitlab.com/explore").fetch,
+            "https://gitlab.com/explore"
+        );
+    }
+
+    #[test]
+    fn readmes_are_found_in_file_lists() {
+        let json = r#"[{"name":"LICENSE","type":"file"},{"name": "readme.rst"},{"name":"README.md","path":"x \"y\""}]"#;
+        let names = json_strings(json, "name");
+        assert_eq!(names, ["LICENSE", "readme.rst", "README.md"]);
+        assert_eq!(pick_readme(&names), Some("README.md"));
+        assert_eq!(pick_readme(&names[..2]), Some("readme.rst"));
+        assert_eq!(pick_readme(&names[..1]), None);
+        let project =
+            r#"{"id":1,"readme_url":"https://gitlab.com/g/p/-/blob/main/README.md","x":null}"#;
+        assert_eq!(
+            json_strings(project, "readme_url"),
+            ["https://gitlab.com/g/p/-/blob/main/README.md"]
+        );
+        assert!(json_strings(r#"{"readme_url":null}"#, "readme_url").is_empty());
     }
 
     #[test]

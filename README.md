@@ -285,9 +285,10 @@ mmore https://github.com/houseofmackee/mmore/blob/main/CHANGELOG.md
 ```
 
 What the document is comes from the end of its address (`guide.md` is rendered as
-Markdown). For GitHub, a repository's address shows its README, a `/tree/` address
-the README of that directory, and a `/blob/` address the file itself rather than
-the web page around it. Relative links in a fetched document lead to the
+Markdown). For GitHub, GitLab (gitlab.com), and Codeberg, a repository's address
+shows its README, a folder's address (`/tree/` on GitHub and GitLab, `/src/` on
+Codeberg) the README of that folder, and a file's address (`/blob/`, `/-/blob/`,
+or `/src/`) the file itself rather than the web page around it. Relative links in a fetched document lead to the
 documents next to it, so `Tab` and `Enter` (see
 [Following links](#following-links)) work through a repository's documentation;
 `R` fetches the document again. A fetched page cannot open `file://` links on your
