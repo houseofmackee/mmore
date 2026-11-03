@@ -14,6 +14,8 @@ section here, so a version can only be released once it has one.
 
 - Marks, `''`, and Backspace after following a link go back to the exact row,
   not to the first row of a long (wrapped) line, which could be a row or more off.
+- The help screen and the table of contents name the keys that close them (and
+  choose a heading) as they are bound, instead of always `q` and `j`/`k`.
 
 ## [0.6.3] - 2026-11-03
 

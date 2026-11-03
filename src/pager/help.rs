@@ -1,5 +1,8 @@
 //! The help screen.
 
+use crossterm::event::KeyCode;
+
+use super::keys::{Action, Keymap};
 use crate::style::{Line, Style};
 
 /// Keys and what they do (also in the manual page).
@@ -62,7 +65,19 @@ pub const KEYS: &[(&str, &str)] = &[
     ("q  :q  Ctrl-C", "Quit"),
 ];
 
-pub fn lines(keymap: &super::keys::Keymap) -> Vec<Line> {
+/// The keys that close the help screen (or the table of contents), by name.
+pub fn close_keys(keymap: &Keymap) -> Vec<String> {
+    keymap.keys_for(
+        &[Action::Quit, Action::Help, Action::ClearSearch],
+        &[
+            ("q", KeyCode::Char('q')),
+            ("h", KeyCode::Char('h')),
+            ("Esc", KeyCode::Esc),
+        ],
+    )
+}
+
+pub fn lines(keymap: &Keymap) -> Vec<Line> {
     let bold = Style {
         bold: true,
         ..Style::default()
@@ -99,6 +114,13 @@ pub fn lines(keymap: &super::keys::Keymap) -> Vec<Line> {
         }
     }
     lines.push(Line::default());
-    lines.push(Line::plain("Press q or h to return."));
+    let close = close_keys(keymap);
+    if !close.is_empty() {
+        let keys: Vec<&str> = close.iter().take(2).map(String::as_str).collect();
+        lines.push(Line::plain(format!(
+            "Press {} to return.",
+            keys.join(" or ")
+        )));
+    }
     lines
 }

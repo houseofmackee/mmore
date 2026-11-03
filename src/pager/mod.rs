@@ -1510,7 +1510,10 @@ impl<'a> Pager<'a> {
             } else {
                 "--More--"
             };
-            return format!("Help {at}  q to close");
+            return match help::close_keys(self.opts.keymap).first() {
+                Some(key) => format!("Help {at}  {key} to close"),
+                None => format!("Help {at}"),
+            };
         }
         let vp = &self.view.vp;
         let mut status = if self.follow {
@@ -1585,7 +1588,44 @@ impl<'a> Pager<'a> {
                 }
             }
             let max = (self.cols as usize).saturating_sub(1);
-            let status = "Contents: j/k to choose, Enter to go there, q to close";
+            let keymap = self.opts.keymap;
+            let first = |actions: &[Action], defaults: &[(&str, KeyCode)]| {
+                keymap.keys_for(actions, defaults).into_iter().next()
+            };
+            let down = first(
+                &[Action::LineDown],
+                &[("j", KeyCode::Char('j')), ("Down", KeyCode::Down)],
+            );
+            let up = first(
+                &[Action::LineUp],
+                &[("k", KeyCode::Char('k')), ("Up", KeyCode::Up)],
+            );
+            let close = first(
+                &[
+                    Action::Quit,
+                    Action::Contents,
+                    Action::ClearSearch,
+                    Action::Help,
+                ],
+                &[
+                    ("q", KeyCode::Char('q')),
+                    ("t", KeyCode::Char('t')),
+                    ("Esc", KeyCode::Esc),
+                ],
+            );
+            let mut parts = vec!["Contents:".to_string()];
+            match (down, up) {
+                (Some(down), Some(up)) => parts.push(format!("{down}/{up} to choose,")),
+                (Some(key), None) | (None, Some(key)) => parts.push(format!("{key} to choose,")),
+                (None, None) => {}
+            }
+            parts.push("Enter to go there".into());
+            if let Some(close) = close {
+                parts.last_mut().expect("just pushed").push(',');
+                parts.push(format!("{close} to close"));
+            }
+            let status = parts.join(" ");
+            let status = status.as_str();
             queue!(
                 out,
                 MoveTo(0, height as u16),
@@ -2849,6 +2889,36 @@ mod tests {
     }
 
     #[test]
+    fn help_and_contents_name_the_keys_that_work() {
+        let text = sections(3);
+        let mut p = Pager::new(doc(&[("a.md", &text)]), &OPTS, 80, 70);
+        press(&mut p, "h");
+        assert!(p.status().ends_with("q to close"), "{}", p.status());
+        assert!(screen(&p).contains("Press q or h to return."));
+        press(&mut p, "qt");
+        assert!(screen(&p).contains("Contents: j/k to choose, Enter to go there, q to close"));
+
+        let mut keys = keys::Keymap::new();
+        keys.bind("q", "nothing").unwrap();
+        keys.bind("j", "nothing").unwrap();
+        keys.bind("x", "quit").unwrap();
+        let opts = Options {
+            keymap: &keys,
+            ..OPTS
+        };
+        let mut p = Pager::new(doc(&[("a.md", &text)]), &opts, 80, 70);
+        press(&mut p, "h");
+        assert!(p.status().ends_with("h to close"), "{}", p.status());
+        assert!(screen(&p).contains("Press h or Esc to return."));
+        press(&mut p, "ht");
+        assert!(
+            screen(&p).contains("Contents: Down/k to choose, Enter to go there, t to close"),
+            "{}",
+            screen(&p)
+        );
+    }
+
+    #[test]
     fn marks_keep_the_row_within_a_long_line() {
         // A line that wraps into five rows at width 10, between short lines.
         let text = format!("{}{}\n{}", numbered(3), "x".repeat(50), numbered(20));
@@ -2859,7 +2929,11 @@ mod tests {
         press(&mut p, "G'a");
         assert_eq!(p.view.vp.top, 5);
         press(&mut p, "''");
-        assert_eq!(p.view.vp.top, p.view.vp.max_top(), "'' goes back to the end");
+        assert_eq!(
+            p.view.vp.top,
+            p.view.vp.max_top(),
+            "'' goes back to the end"
+        );
         press(&mut p, "''");
         assert_eq!(p.view.vp.top, 5);
     }

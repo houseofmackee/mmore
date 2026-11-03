@@ -153,6 +153,27 @@ impl Keymap {
             .map_or_else(|| map(key), |(_, _, action, ..)| *action)
     }
 
+    /// Names of the keys that do one of `actions` now, for messages: those of
+    /// `defaults` (key name and key) that still do, then keys bound to them in
+    /// the config file.
+    pub fn keys_for(&self, actions: &[Action], defaults: &[(&str, KeyCode)]) -> Vec<String> {
+        let mut names: Vec<String> = defaults
+            .iter()
+            .filter(|(_, code)| {
+                actions.contains(&self.map(KeyEvent::new(*code, KeyModifiers::NONE)))
+            })
+            .map(|(name, _)| name.to_string())
+            .collect();
+        for (code, modifiers, action, key, _) in &self.bindings {
+            // Only bindings that are still in effect (not bound again later).
+            let current = self.map(KeyEvent::new(*code, *modifiers));
+            if actions.contains(action) && current == *action && !names.contains(key) {
+                names.push(key.clone());
+            }
+        }
+        names
+    }
+
     /// The bindings as written: key and action name.
     pub fn bindings(&self) -> impl Iterator<Item = (&str, &str)> {
         self.bindings
