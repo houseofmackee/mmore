@@ -611,6 +611,46 @@ def startup_timing(tmp):
     rows = re.findall(r"\x1b\[(\d+);1H\x1b\[2K\x1b\[\?25l", out.decode(errors="replace"))
     check("a resize as the pager starts is not missed", rows[-1:] == ["29"], str(rows))
 
+    # A terminal like Warp gives the full-screen view a different size (here one
+    # row less and three columns more) and switches back a moment after the
+    # program leaves it. The shell must find the original size when mmore has
+    # exited, or zsh leaves its % mark on the screen. A terminal that keeps its
+    # size must not make mmore wait.
+    def leave_and_measure(switch):
+        pid, fd = spawn(f"{BIN} --always-page {MD}; stty size; echo DONE", clean_env(), 42, 141)
+        out = b""
+        start = time.time()
+        entered = left = None
+        quit_at = None
+        while time.time() - start < START_WAIT and b"DONE" not in out:
+            r, _, _ = select.select([fd], [], [], 0.002)
+            if r:
+                try:
+                    out += os.read(fd, 65536)
+                except OSError:
+                    break
+            if entered is None and ALT_ON.encode() in out:
+                entered = time.time()
+                if switch:
+                    set_size(fd, 41, 144)
+            if entered and quit_at is None and b"--More--" in out and time.time() - entered > 0.3:
+                os.write(fd, b"q")
+                quit_at = time.time()
+            if quit_at and left is None and ALT_OFF.encode() in out:
+                left = time.time()
+            if switch and left and time.time() - left > 0.15:
+                set_size(fd, 42, 141)
+                switch = False
+        code, out = finish(pid, fd, out)
+        size = re.findall(r"(\d+ \d+)\r?\n", out.decode(errors="replace").rsplit(ALT_OFF, 1)[-1])
+        took = None if quit_at is None or b"DONE" not in out else time.time() - quit_at
+        return size, took
+
+    size, _ = leave_and_measure(True)
+    check("after a full-screen size switch, mmore waits for the size to come back", size == ["42 141"], str(size))
+    size, took = leave_and_measure(False)
+    check("without a size switch, mmore exits without waiting", size == ["42 141"] and took is not None and took < 0.25, f"{size} {took}")
+
 
 def less_keys(tmp, n100):
     # A count before g, %, and j: go to a line, a percentage, or move N lines.

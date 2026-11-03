@@ -5,6 +5,14 @@ section here, so a version can only be released once it has one.
 
 ## [Unreleased]
 
+### Fixed
+
+- In Warp, zsh's `%` mark could still appear after quitting. Warp gives
+  full-screen programs a different size and switches back a moment after they
+  leave, and a shell that looked at the size in between got the full-screen
+  width. When the size changed like that, mmore now waits (at most 0.3 s) for
+  the size to come back before it exits.
+
 ## [0.6.1] - 2026-11-03
 
 ### Fixed
