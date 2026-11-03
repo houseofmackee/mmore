@@ -5,6 +5,8 @@ section here, so a version can only be released once it has one.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-03
+
 ### Fixed
 
 - A stray `%` could appear in zsh after quitting, in terminals that do not put
@@ -93,7 +95,8 @@ First release.
 - Light or dark theme picked from the terminal's background.
 - Builds for macOS and Linux, and a Homebrew formula.
 
-[Unreleased]: https://github.com/houseofmackee/mmore/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/mmore/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/houseofmackee/mmore/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/houseofmackee/mmore/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/houseofmackee/mmore/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/houseofmackee/mmore/compare/v0.1.0...v0.2.0
