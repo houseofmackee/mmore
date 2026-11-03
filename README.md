@@ -46,6 +46,14 @@ cargo install --path .
 This builds an optimized binary and puts it in `~/.cargo/bin`. To install it
 somewhere else, add `--root DIR` (the binary goes in `DIR/bin`).
 
+The Homebrew formula also installs shell completions and a manual page
+(`man mmore`). Without Homebrew, `mmore` writes them itself:
+
+```sh
+mmore --completions zsh > ~/.zfunc/_mmore    # also bash, fish, elvish, powershell
+mmore --man > ~/.local/share/man/man1/mmore.1
+```
+
 ## Features
 
 - **Pager**: `more`-style keys plus a few from `less`, search, several files, a

@@ -5,6 +5,12 @@ section here, so a version can only be released once it has one.
 
 ## [Unreleased]
 
+### Added
+
+- Shell completions (`mmore --completions zsh`, and bash, fish, elvish, and
+  PowerShell) and a manual page (`mmore --man`), which the Homebrew formula
+  installs.
+
 ## [0.4.1] - 2026-11-03
 
 ### Fixed

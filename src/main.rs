@@ -29,6 +29,18 @@ use stream::Stream;
 use style::Line;
 
 fn main() -> ExitCode {
+    match cli::Packaging::from_args() {
+        Some(Ok(cli::Packaging::Completions(shell))) => {
+            cli::completions(shell, &mut io::stdout());
+            return ExitCode::SUCCESS;
+        }
+        Some(Ok(cli::Packaging::Man)) => return finish(cli::man_page(&mut io::stdout())),
+        Some(Err(e)) => {
+            eprintln!("mmore: {e}");
+            return ExitCode::from(2);
+        }
+        None => {}
+    }
     let cli = Cli::parse_from(cli::args());
 
     if cli.list_themes {

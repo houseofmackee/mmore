@@ -5,7 +5,7 @@
 //! scroll position.
 
 mod editor;
-mod help;
+pub mod help;
 mod keys;
 mod screen;
 mod search;

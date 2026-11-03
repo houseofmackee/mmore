@@ -2,7 +2,8 @@
 
 use crate::style::{Line, Style};
 
-const KEYS: &[(&str, &str)] = &[
+/// Keys and what they do (also in the manual page).
+pub const KEYS: &[(&str, &str)] = &[
     (
         "Space  f  PgDn  Ctrl-F",
         "Next page (at the end: next file)",

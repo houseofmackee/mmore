@@ -758,3 +758,45 @@ fn missing_decompressor_is_reported() {
         .stdout(predicate::str::contains("# Title"));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn completions_for_the_usual_shells() {
+    for (shell, marker) in [
+        ("bash", "_mmore()"),
+        ("zsh", "#compdef mmore"),
+        ("fish", "complete -c mmore"),
+    ] {
+        mmore()
+            .args(["--completions", shell])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(marker))
+            .stdout(predicate::str::contains("chop-long-lines"))
+            // The packaging commands are not offered.
+            .stdout(predicate::str::contains("--completions").not())
+            .stdout(predicate::str::contains("--man").not());
+    }
+}
+
+#[test]
+fn unknown_completion_shell_is_an_error() {
+    mmore()
+        .args(["--completions", "tcsh"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unknown shell 'tcsh'"));
+}
+
+#[test]
+fn man_page_has_options_keys_and_environment() {
+    mmore()
+        .arg("--man")
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with(".ie"))
+        .stdout(predicate::str::contains(".SH OPTIONS"))
+        .stdout(predicate::str::contains(".SH KEYS"))
+        .stdout(predicate::str::contains("\\fBTab, Shift\\-Tab\\fR"))
+        .stdout(predicate::str::contains(".SH ENVIRONMENT"))
+        .stdout(predicate::str::contains("MMORE_OPTS"));
+}

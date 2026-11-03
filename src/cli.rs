@@ -7,13 +7,32 @@ use std::ffi::OsString;
 
 use crate::ansi::When;
 
-const AFTER_HELP: &str = "\
-Environment:
-  MMORE_OPTS   Default options, read before the command line (e.g. \"-n --theme InspiredGitHub\")
-  NO_COLOR     Disable colors (text attributes such as bold are kept)
-  COLORFGBG    Terminal colors; a light background selects a light theme
+/// Environment variables, for the manual page (`AFTER_HELP` lists them too).
+const ENVIRONMENT: &[(&str, &str)] = &[
+    (
+        "MMORE_OPTS",
+        "Default options, read before the command line (e.g. \"-n --theme InspiredGitHub\")",
+    ),
+    (
+        "NO_COLOR",
+        "Disable colors (text attributes such as bold are kept)",
+    ),
+    (
+        "COLORFGBG",
+        "Terminal colors; a light background selects a light theme",
+    ),
+    ("VISUAL, EDITOR", "The editor that v opens"),
+];
 
-Press h while paging for the list of keys.";
+const AFTER_HELP: &str = concat!(
+    "Environment:\n",
+    "  MMORE_OPTS   Default options, read before the command line (e.g. \"-n --theme InspiredGitHub\")\n",
+    "  NO_COLOR     Disable colors (text attributes such as bold are kept)\n",
+    "  COLORFGBG    Terminal colors; a light background selects a light theme\n",
+    "  VISUAL, EDITOR   The editor that v opens\n",
+    "\n",
+    "Press h while paging for the list of keys."
+);
 
 /// Command-line arguments with the options from `MMORE_OPTS` inserted first.
 pub fn args() -> Vec<OsString> {
@@ -165,6 +184,71 @@ pub struct Cli {
     /// Page even if the content fits on one screen.
     #[arg(long)]
     pub always_page: bool,
+}
+
+/// What packagers run instead of the pager: `mmore --completions SHELL` and
+/// `mmore --man`. These are not regular options, so they stay out of the help,
+/// the completions, and the manual page.
+pub enum Packaging {
+    Completions(clap_complete::Shell),
+    Man,
+}
+
+impl Packaging {
+    /// From the real command line (`MMORE_OPTS` does not apply). An unknown
+    /// shell is an error.
+    pub fn from_args() -> Option<Result<Packaging, String>> {
+        let args: Vec<String> = env::args().skip(1).collect();
+        match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+            ["--man"] => Some(Ok(Packaging::Man)),
+            ["--completions", shell] => {
+                Some(shell.parse().map(Packaging::Completions).map_err(|_| {
+                    format!("unknown shell '{shell}' (bash, elvish, fish, powershell, zsh)")
+                }))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Write the completion script for `shell`.
+pub fn completions(shell: clap_complete::Shell, out: &mut impl std::io::Write) {
+    use clap::CommandFactory;
+    clap_complete::generate(shell, &mut Cli::command(), "mmore", out);
+}
+
+/// Write the manual page, with the keys and environment as extra sections.
+pub fn man_page(out: &mut impl std::io::Write) -> std::io::Result<()> {
+    use clap::CommandFactory;
+    let man = clap_mangen::Man::new(Cli::command());
+    man.render_title(out)?;
+    man.render_name_section(out)?;
+    man.render_synopsis_section(out)?;
+    man.render_description_section(out)?;
+    man.render_options_section(out)?;
+    // Tagged paragraphs: the key (or variable), then what it does.
+    writeln!(out, ".SH KEYS")?;
+    for (keys, what) in crate::pager::help::KEYS {
+        let keys = keys.split("  ").collect::<Vec<_>>().join(", ");
+        writeln!(out, ".TP\n\\fB{}\\fR\n{}", roff(&keys), roff(what))?;
+    }
+    writeln!(out, ".SH ENVIRONMENT")?;
+    for (name, what) in ENVIRONMENT {
+        writeln!(out, ".TP\n\\fB{}\\fR\n{}", roff(name), roff(what))?;
+    }
+    writeln!(out, ".SH SEE ALSO")?;
+    writeln!(out, "less(1), more(1)")?;
+    man.render_version_section(out)
+}
+
+/// Escape text for roff: backslashes, and a leading `.` or `'` (control lines).
+fn roff(s: &str) -> String {
+    let s = s.replace('\\', "\\e").replace('-', "\\-");
+    if s.starts_with('.') || s.starts_with('\'') {
+        format!("\\&{s}")
+    } else {
+        s
+    }
 }
 
 #[cfg(test)]

@@ -167,6 +167,8 @@ jobs:
 
             def install
               bin.install "mmore"
+              generate_completions_from_executable(bin/"mmore", "--completions")
+              (man1/"mmore.1").write Utils.safe_popen_read(bin/"mmore", "--man")
             end
 
             test do
