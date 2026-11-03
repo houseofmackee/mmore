@@ -144,7 +144,7 @@ pub fn run(document: Document, opts: &Options) -> io::Result<()> {
         match pager.key(key) {
             Flow::Quit => return finish(pager, screen, opts),
             // Suspending or editing before the first screen would be odd.
-            Flow::Suspend | Flow::Edit | Flow::Continue => {}
+            Flow::Suspend | Flow::Edit | Flow::Pipe(_) | Flow::Continue => {}
         }
     }
     let mut late_replies = keys::LateReplies::default();
@@ -199,6 +199,17 @@ pub fn run(document: Document, opts: &Options) -> io::Result<()> {
                     Flow::Suspend => {
                         screen.suspend()?;
                         // The terminal may have been resized meanwhile.
+                        let (cols, rows) = terminal::size()?;
+                        pager.resize(cols, rows);
+                    }
+                    Flow::Pipe(command) => {
+                        let text = pager.view_text();
+                        let result = screen.outside(|| editor::pipe(&command, &text))?;
+                        pager.message = match result {
+                            Ok(status) if status.success() => None,
+                            Ok(status) => Some(format!("{command}: {status}")),
+                            Err(e) => Some(format!("Could not run {command}: {e}")),
+                        };
                         let (cols, rows) = terminal::size()?;
                         pager.resize(cols, rows);
                     }
@@ -257,6 +268,8 @@ enum Flow {
     Suspend,
     /// Open the current file in an editor (`v`).
     Edit,
+    /// Send the text to a command (`|`).
+    Pipe(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,6 +283,10 @@ enum PromptKind {
     Mark {
         set: bool,
     },
+    /// The file to save to (`s`).
+    Save,
+    /// The command to send the text to (`|`).
+    Pipe,
 }
 
 /// One laid-out screenful source: rows plus scroll position.
@@ -682,6 +699,8 @@ impl<'a> Pager<'a> {
                 }
             }
             Action::Edit => return Flow::Edit,
+            Action::Save => self.prompt = Some((PromptKind::Save, String::new())),
+            Action::Pipe => self.prompt = Some((PromptKind::Pipe, String::new())),
             Action::Filter => {
                 self.prompt_modifiers = PromptModifiers::default();
                 self.prompt = Some((PromptKind::Filter, String::new()));
@@ -791,7 +810,9 @@ impl<'a> Pager<'a> {
                     self.start_search(&input, backward);
                 }
                 PromptKind::Filter => self.set_filter(&input),
-                PromptKind::Command | PromptKind::Mark { .. } => {}
+                PromptKind::Save => self.save(&input),
+                PromptKind::Pipe if !input.trim().is_empty() => return Flow::Pipe(input),
+                PromptKind::Pipe | PromptKind::Command | PromptKind::Mark { .. } => {}
             },
             KeyCode::Char(c) if !ctrl => match kind {
                 PromptKind::Command => return self.command(c),
@@ -800,6 +821,10 @@ impl<'a> Pager<'a> {
                 PromptKind::Search { .. } | PromptKind::Filter => {
                     input.push(c);
                     self.preview_search(kind, &input);
+                    self.prompt = Some((kind, input));
+                }
+                PromptKind::Save | PromptKind::Pipe => {
+                    input.push(c);
                     self.prompt = Some((kind, input));
                 }
             },
@@ -1110,6 +1135,45 @@ impl<'a> Pager<'a> {
             }
             None => self.message = Some("No link to go back from".into()),
         }
+    }
+
+    /// The lines shown (after a filter; rendered, or the source with `r`), as
+    /// plain text with a newline after each: what `s` saves and `|` sends.
+    fn view_text(&self) -> String {
+        let wrapped = &self.view.wrapped;
+        let mut text = String::new();
+        for (r, row) in wrapped.rows.iter().enumerate() {
+            text.push_str(&row.text());
+            if wrapped.line.get(r + 1) != Some(&wrapped.line[r]) {
+                text.push('\n');
+            }
+        }
+        text
+    }
+
+    /// `s`: save the lines shown to a file, which must not exist yet.
+    fn save(&mut self, input: &str) {
+        let name = input.trim();
+        if name.is_empty() {
+            return;
+        }
+        let path = match (name.strip_prefix("~/"), std::env::var_os("HOME")) {
+            (Some(rest), Some(home)) => std::path::PathBuf::from(home).join(rest),
+            _ => std::path::PathBuf::from(name),
+        };
+        let text = self.view_text();
+        let result = std::fs::File::options()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(text.as_bytes()));
+        self.message = Some(match result {
+            Ok(()) => format!("Saved {} lines to {}", text.lines().count(), path.display()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                format!("{} exists already; not saved", path.display())
+            }
+            Err(e) => format!("Could not save to {}: {e}", path.display()),
+        });
     }
 
     /// `m` and a letter.
@@ -1861,6 +1925,8 @@ impl<'a> Pager<'a> {
                     PromptKind::Filter => "&",
                     PromptKind::Mark { set: true } => "m",
                     PromptKind::Mark { set: false } => "'",
+                    PromptKind::Save => "Save to file: ",
+                    PromptKind::Pipe => "Send to command: |",
                 };
                 let mut modifiers = String::new();
                 if matches!(kind, PromptKind::Search { .. } | PromptKind::Filter) {
@@ -3144,6 +3210,50 @@ mod tests {
 
     fn ctrl(p: &mut Pager, c: char) {
         p.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn save_writes_the_lines_shown() {
+        let dir = std::env::temp_dir().join(format!("mmore-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let long = format!("{} end", "word ".repeat(12));
+        let text = format!("error one\nok\n{long}\nerror two\n");
+        let mut p = Pager::new(doc(&[("a.txt", &text)]), &OPTS, 20, 10);
+        // A long line wraps on screen but is saved as one line.
+        assert_eq!(p.view_text(), text);
+        press(&mut p, "&error\n");
+        assert_eq!(p.view_text(), "error one\nerror two\n");
+        let target = dir.join("errors.txt");
+        press(&mut p, &format!("s{}\n", target.display()));
+        assert_eq!(
+            p.message.as_deref(),
+            Some(format!("Saved 2 lines to {}", target.display()).as_str())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "error one\nerror two\n"
+        );
+        // An existing file is not overwritten.
+        press(&mut p, "&\n");
+        press(&mut p, &format!("s{}\n", target.display()));
+        assert!(
+            p.message
+                .as_deref()
+                .unwrap()
+                .ends_with("exists already; not saved")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "error one\nerror two\n"
+        );
+        // ~/ is the home directory.
+        let home = std::env::var("HOME").unwrap();
+        let name = format!("mmore-save-test-{}.txt", std::process::id());
+        press(&mut p, &format!("s~/{name}\n"));
+        let saved = std::path::Path::new(&home).join(&name);
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), text);
+        std::fs::remove_file(saved).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -64,6 +64,8 @@ pub const KEYS: &[(&str, &str)] = &[
     ),
     ("Backspace", "Go back to where the last followed link was"),
     ("v", "Edit the file ($VISUAL or $EDITOR), then reload it"),
+    ("s", "Save the lines shown to a file"),
+    ("|", "Send the lines shown to a command (| wc -l, | pbcopy)"),
     (
         "R",
         "Reload the file (--watch does it when the file changes)",

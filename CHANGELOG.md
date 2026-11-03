@@ -14,6 +14,9 @@ section here, so a version can only be released once it has one.
   background, so the automatic choice can use your favorite themes.
 - `F` follows files too, not only piped input: lines added to the file show up
   at the end, like `tail -F`, also after the log is rotated.
+- `s` saves the lines shown to a file, and `|` sends them to a command (such as
+  `wc -l` or `pbcopy`), as in `less`. Both use what is shown, so they work on a
+  filter's result and on piped input.
 
 ## [0.7.0] - 2026-11-03
 

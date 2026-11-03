@@ -109,6 +109,8 @@ mmore --man > ~/.local/share/man/man1/mmore.1
 | `Backspace` | Go back to where the last followed link was |
 | `v` | Edit the file in `$VISUAL` or `$EDITOR`, at the current line, then reload it |
 | `R` | Reload the file |
+| `s` | Save the lines shown to a new file |
+| `\|` | Send the lines shown to a command, such as `wc -l` or `pbcopy` |
 | `h` | Help |
 | `Ctrl-Z` | Suspend (`fg` resumes) |
 | `q`, `:q`, `Ctrl-C` | Quit |
@@ -123,6 +125,12 @@ search, Ctrl-K highlights the matches without moving (the prompt shows
 expression (`Regex-off`). With several files, a search that
 finds nothing more in the current file goes on to the next file with a match (or
 the previous one, going backward).
+`s` and `|` work on the lines as shown: after a filter, rendered (or the source,
+after `r`), and without colors. So `&error` followed by `|wc -l` counts the error
+lines, and `s` keeps piped input that is gone otherwise. `s` does not overwrite a
+file that exists; `|` runs the command with the terminal, so its output shows
+until you press Enter.
+
 A filter also applies to piped input as it arrives, so `tail -f app.log | mmore`
 followed by `&error` shows new errors only.
 

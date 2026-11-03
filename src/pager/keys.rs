@@ -53,6 +53,10 @@ pub enum Action {
     PrevLink,
     /// Go back to where the last followed link was (Backspace).
     Back,
+    /// Save the text to a file (`s`).
+    Save,
+    /// Send the text to a command (`|`).
+    Pipe,
     Quit,
     None,
 }
@@ -100,6 +104,8 @@ pub const ACTIONS: &[(&str, Action)] = &[
     ("set-mark", Action::SetMark),
     ("go-to-mark", Action::GoToMark),
     ("edit", Action::Edit),
+    ("save", Action::Save),
+    ("pipe", Action::Pipe),
     ("reload", Action::Reload),
     ("help", Action::Help),
     ("suspend", Action::Suspend),
@@ -289,6 +295,8 @@ pub fn map(key: KeyEvent) -> Action {
         KeyCode::Char('[') => Action::PrevHeading,
         KeyCode::Char('t') => Action::Contents,
         KeyCode::Char('R') => Action::Reload,
+        KeyCode::Char('s') => Action::Save,
+        KeyCode::Char('|') => Action::Pipe,
         KeyCode::Tab => Action::NextLink,
         KeyCode::BackTab => Action::PrevLink,
         KeyCode::Backspace => Action::Back,

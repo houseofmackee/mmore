@@ -1,4 +1,5 @@
-//! Opening the current file in an editor (`v`), as `less` does.
+//! Opening the current file in an editor (`v`), and sending the text to a
+//! command (`|`), as `less` does.
 
 use std::env;
 use std::ffi::OsString;
@@ -74,6 +75,31 @@ pub fn open(path: &Path, line: usize) -> io::Result<()> {
     } else {
         Err(io::Error::other(format!("{program} exited with {status}")))
     }
+}
+
+/// `|`: run `command` with the shell, with `text` as its input and the
+/// terminal for its output, then wait for Enter so the output can be read.
+pub fn pipe(command: &str, text: &str) -> io::Result<std::process::ExitStatus> {
+    use std::io::{BufRead, Write};
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .stdin(Stdio::piped())
+        .spawn()?;
+    if let Some(mut input) = child.stdin.take() {
+        // A command that does not read everything (head) closes the pipe early.
+        let _ = input.write_all(text.as_bytes());
+    }
+    let status = child.wait()?;
+    let mut tty = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")?;
+    write!(tty, "\n(press Enter to go back to mmore) ")?;
+    tty.flush()?;
+    let mut line = String::new();
+    std::io::BufReader::new(tty).read_line(&mut line)?;
+    Ok(status)
 }
 
 #[cfg(test)]

@@ -490,6 +490,17 @@ def start_commands(n100):
     check("-X leaves the last screen after quitting", kept == [str(i) for i in range(10, 19)], str(kept))
 
 
+def save_and_pipe(n100):
+    # | sends the lines shown (here after a filter) to a command, whose output
+    # shows until Enter is pressed; then the pager comes back.
+    keys = ["&", "7", "\r", "|"] + list("wc -l") + ["\r", ("SHOWN", "press Enter"), "\r", ("SHOWN", "--More--"), "q"]
+    out, code, snaps = run(f"{BIN} {n100}", keys, rows=10, cols=60)
+    piped = "".join(after(snaps, i) for i in range(9, 11))
+    check("| sends the filtered lines to a command", re.search(r"\b19\r?\n", piped) is not None, repr(piped[:80]))
+    back = after(snaps, 11) + after(snaps, 12)
+    check("Enter after the command returns to the pager", ALT_ON in back and "[&7: 19 lines]" in back and code == 0)
+
+
 def config_keys(tmp, n100):
     # Keys bound in the config file: x quits, q is turned off, and the help
     # screen lists the bindings.
@@ -1013,6 +1024,7 @@ def main():
         less_keys(tmp, n100)
         config_keys(tmp, n100)
         start_commands(n100)
+        save_and_pipe(n100)
         remote_documents(tmp)
         startup_timing(tmp)
         git_pager(tmp)
