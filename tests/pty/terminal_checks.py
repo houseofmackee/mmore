@@ -804,6 +804,19 @@ def reading_documents(tmp):
     check("--watch shows the file after it changes", "second version" in snaps[2][len(snaps[0]):].decode(errors="replace"))
     check("--watch is shown in the status line", "[watching]" in out)
 
+    # F on a file follows it, like tail -F: appended lines show up at the end.
+    growing = os.path.join(tmp, "growing.log")
+    with open(growing, "w") as f:
+        f.write("".join(f"entry {i}\n" for i in range(1, 40)))
+
+    def append():
+        time.sleep(0.3)
+        with open(growing, "a") as f:
+            f.write("appended later\n")
+
+    out, code, snaps = run(f"{BIN} {growing}", ["F", append, ("SHOWN", "appended later"), "q"], rows=10, cols=40)
+    check("F on a file shows lines appended to it", "appended later" in after(snaps, 2) + after(snaps, 1) and code == 0)
+
     # Marks: m sets, ' goes back; '' returns from a jump.
     n = os.path.join(tmp, "marks.txt")
     with open(n, "w") as f:

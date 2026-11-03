@@ -12,6 +12,8 @@ section here, so a version can only be released once it has one.
   to the repository's other files.
 - `--theme-light` and `--theme-dark` choose the theme for each kind of
   background, so the automatic choice can use your favorite themes.
+- `F` follows files too, not only piped input: lines added to the file show up
+  at the end, like `tail -F`, also after the log is rotated.
 
 ## [0.7.0] - 2026-11-03
 

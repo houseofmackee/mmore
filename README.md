@@ -92,7 +92,7 @@ mmore --man > ~/.local/share/man/man1/mmore.1
 | `Left` / `Right` | Scroll sideways when long lines are cut off |
 | Mouse wheel | Scroll 3 lines (with `--mouse`) |
 | Click a link | Follow it (with `--mouse`) |
-| `F` | Follow new input at the end, as with `tail -f` (any key stops) |
+| `F` | Follow new input at the end, as with `tail -F`, for piped input and files (any key stops) |
 | `/pattern`, `?pattern` | Search forward / backward |
 | `&pattern` | Show only lines that match (`&` and Enter shows all again) |
 | `]` / `[` | Next / previous heading (Markdown) |
@@ -255,13 +255,19 @@ too.
 ## Piped input
 
 Input from a pipe is shown as it arrives, so `make 2>&1 | mmore` starts paging
-right away and `tail -f app.log | mmore` keeps growing; press `F` to keep the newest
+right away and `tail -f app.log | mmore` keeps growing (`mmore app.log` and `F` work
+too, see below); press `F` to keep the newest
 lines in view. The same goes for pipes given as file names, such as named pipes
 (FIFOs) and process substitution: `mmore <(make 2>&1)`. While input is still arriving, the status line shows
 `(waiting for input)` at the end instead of a percentage. Piped input is shown as
 plain text, unless its first line names a language (`#!/usr/bin/env python3`),
 in which case `mmore` waits for the end and highlights it. Line numbers (`-n`)
 for piped input always leave room for five digits, since its length is unknown.
+
+`F` also follows a file: `mmore app.log` and `F` show lines as they are added,
+like `tail -F`. The file is read again by name each time it changes, so this
+goes on when the log is rotated (moved away and started anew, or truncated);
+very large files take a moment to read again each time.
 
 ### As git's pager
 

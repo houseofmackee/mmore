@@ -24,7 +24,10 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Left  Right", "Scroll sideways when lines are not wrapped"),
     ("Mouse wheel", "Scroll 3 lines (needs --mouse)"),
     ("Click a link", "Follow it (needs --mouse)"),
-    ("F", "Follow new input at the end (any key stops)"),
+    (
+        "F",
+        "Follow new input at the end, also of a file (any key stops)",
+    ),
     (
         "/pattern",
         "Search forward (regex; case-insensitive if all lowercase)",

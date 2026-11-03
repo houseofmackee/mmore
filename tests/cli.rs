@@ -941,14 +941,25 @@ fn light_and_dark_themes_can_be_chosen_separately() {
     };
     let (light, dark) = ("0;15", "15;0");
     let solarized = ["--theme", "Solarized (light)"];
-    let chosen = ["--theme-light", "Solarized (light)", "--theme-dark", "base16-mocha.dark"];
+    let chosen = [
+        "--theme-light",
+        "Solarized (light)",
+        "--theme-dark",
+        "base16-mocha.dark",
+    ];
     assert_eq!(run(light, &chosen), run(light, &solarized));
-    assert_eq!(run(dark, &chosen), run(dark, &["--theme", "base16-mocha.dark"]));
+    assert_eq!(
+        run(dark, &chosen),
+        run(dark, &["--theme", "base16-mocha.dark"])
+    );
     assert_ne!(run(dark, &chosen), run(dark, &[]));
     // --theme wins over both.
     let mut forced = chosen.to_vec();
     forced.extend(["--theme", "InspiredGitHub"]);
-    assert_eq!(run(dark, &forced), run(dark, &["--theme", "InspiredGitHub"]));
+    assert_eq!(
+        run(dark, &forced),
+        run(dark, &["--theme", "InspiredGitHub"])
+    );
     // A wrong name is an error even when that theme would not be used.
     mmore()
         .args(["--theme-dark", "Nope", "tests/fixtures/hello.rs"])

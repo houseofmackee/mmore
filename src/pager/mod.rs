@@ -178,7 +178,7 @@ pub fn run(document: Document, opts: &Options) -> io::Result<()> {
         let busy = pager.highlighting() || pager.reading();
         let wait = if busy {
             HIGHLIGHT_POLL
-        } else if opts.watch {
+        } else if pager.watching() {
             WATCH_POLL
         } else {
             SIZE_POLL
@@ -1303,10 +1303,17 @@ impl<'a> Pager<'a> {
         }
     }
 
+    /// Whether to look for changes to the file on disk: with `--watch`, or while
+    /// following (`F`) a file, as `tail -F` does. A file is read again by name,
+    /// so following goes on after a log is rotated.
+    fn watching(&self) -> bool {
+        self.opts.watch || (self.follow && self.stream().is_none())
+    }
+
     /// `--watch`: reload the current file if it changed on disk since it was
     /// loaded. Looks at most every `WATCH_POLL`. Returns whether it reloaded.
     fn check_watched(&mut self) -> bool {
-        if !self.opts.watch || self.watched_at.elapsed() < WATCH_POLL {
+        if !self.watching() || self.watched_at.elapsed() < WATCH_POLL {
             return false;
         }
         self.watched_at = std::time::Instant::now();
@@ -3050,6 +3057,40 @@ mod tests {
         p.watched_at -= WATCH_POLL;
         p.check_watched();
         assert_eq!(top_text(&p), "line 42");
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn following_a_file_follows_it_by_name() {
+        let (path, d) = on_disk("app.log", &numbered(30));
+        let reload = read_plain;
+        let opts = Options {
+            reload: Some(&reload),
+            ..OPTS
+        };
+        let mut p = Pager::new(d, &opts, 40, 10);
+        // Without F (and without --watch), changes are not looked for.
+        rewrite(&path, &numbered(35));
+        p.watched_at -= WATCH_POLL;
+        assert!(!p.check_watched());
+        press(&mut p, "F");
+        p.watched_at -= WATCH_POLL;
+        assert!(p.check_watched(), "the change from before is picked up");
+        assert_eq!(top_text(&p), "line 27", "at the end");
+        // The log is rotated: moved away and started anew under its name.
+        std::fs::rename(&path, path.with_extension("log.1")).unwrap();
+        p.watched_at -= WATCH_POLL;
+        assert!(!p.check_watched(), "missing for a moment: wait");
+        rewrite(&path, "new 1\nnew 2\n");
+        p.watched_at -= WATCH_POLL;
+        assert!(p.check_watched());
+        assert_eq!(p.doc.files[0].raw.len(), 2);
+        assert!(p.status().starts_with("Following"));
+        // Any key stops following, and with it the watching.
+        press(&mut p, "g");
+        rewrite(&path, &numbered(3));
+        p.watched_at -= WATCH_POLL;
+        assert!(!p.check_watched());
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
