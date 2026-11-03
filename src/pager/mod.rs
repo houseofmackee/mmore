@@ -37,6 +37,42 @@ use viewport::Viewport;
 
 /// Loads a file again after it was edited (see `v`).
 pub type Reload<'a> = &'a dyn Fn(&Path) -> Option<File>;
+/// Where to start, from the command line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Start {
+    /// `+120`: at line 120.
+    Line(usize),
+    /// `+G`: at the end.
+    End,
+    /// `+/pattern` or `+?pattern` (and `--pattern`): at the first match.
+    Search { pattern: String, backward: bool },
+}
+
+impl Start {
+    /// A `+` command (without the `+`).
+    pub fn parse(command: &str) -> Result<Start, String> {
+        if command == "G" {
+            return Ok(Start::End);
+        }
+        if let Ok(line) = command.parse::<usize>() {
+            return Ok(Start::Line(line));
+        }
+        match command.split_at_checked(1) {
+            Some(("/", pattern)) if !pattern.is_empty() => Ok(Start::Search {
+                pattern: pattern.to_string(),
+                backward: false,
+            }),
+            Some(("?", pattern)) if !pattern.is_empty() => Ok(Start::Search {
+                pattern: pattern.to_string(),
+                backward: true,
+            }),
+            _ => Err(format!(
+                "unknown start command '+{command}' (use +LINE, +G, +/pattern, or +?pattern)"
+            )),
+        }
+    }
+}
+
 /// How to fetch a document from the web (for links in one, and `R`).
 pub type Fetch<'a> = &'a dyn Fn(&str) -> Result<File, String>;
 
@@ -58,6 +94,8 @@ pub struct Options<'a> {
     pub keymap: &'a keys::Keymap,
     /// How to fetch web documents.
     pub fetch: Option<Fetch<'a>>,
+    /// Where to start in the first file (`+120`, `+/pattern`).
+    pub start: Option<&'a Start>,
 }
 
 /// Page the document interactively until the user quits.
@@ -75,6 +113,9 @@ pub fn run(document: Document, opts: &Options) -> io::Result<()> {
     let (cols, rows) = terminal::size()?;
     let mut pager = Pager::new(document, opts, cols, rows);
     pager.wait_for_first_screen(FIRST_SCREEN_WAIT);
+    if let Some(start) = opts.start {
+        pager.start_at(start);
+    }
     // Keys pressed while the terminal was asked about its background come first.
     for key in keys::from_bytes(&crate::background::take_typeahead()) {
         match pager.key(key) {
@@ -1126,6 +1167,30 @@ impl<'a> Pager<'a> {
     }
 
     /// Go to source line `line` (counting from 1), as `120g` does.
+    /// Go where the command line asked (`+120`, `+G`, `+/pattern`).
+    fn start_at(&mut self, start: &Start) {
+        match start {
+            Start::Line(line) => self.go_to_line(*line),
+            Start::End => self.view.vp.apply(Action::Bottom),
+            Start::Search { pattern, backward } => {
+                // A backward search starts from the end.
+                if *backward {
+                    self.view.vp.apply(Action::Bottom);
+                    self.view.vp.top = self.view.wrapped.rows.len();
+                }
+                self.start_search(pattern, *backward);
+                let vp = &mut self.view.vp;
+                vp.top = vp.top.min(vp.max_top());
+            }
+        }
+        // `''` goes back to the top.
+        self.last_place = Some(Place {
+            file: self.file,
+            source: 0,
+            rows_in: 0,
+        });
+    }
+
     fn go_to_line(&mut self, line: usize) {
         let row = self.view.wrapped.first_row_of(line.saturating_sub(1));
         let vp = &mut self.view.vp;
@@ -1903,6 +1968,7 @@ mod tests {
         reload: None,
         keymap: &NO_KEYS,
         fetch: None,
+        start: None,
     };
 
     static NO_KEYS: keys::Keymap = keys::Keymap::new();
@@ -2923,6 +2989,48 @@ mod tests {
             "{}",
             screen(&p)
         );
+    }
+
+    #[test]
+    fn start_commands() {
+        assert_eq!(Start::parse("120"), Ok(Start::Line(120)));
+        assert_eq!(Start::parse("G"), Ok(Start::End));
+        assert_eq!(
+            Start::parse("/err or"),
+            Ok(Start::Search {
+                pattern: "err or".into(),
+                backward: false
+            })
+        );
+        assert!(matches!(
+            Start::parse("?x"),
+            Ok(Start::Search { backward: true, .. })
+        ));
+        assert!(Start::parse("/").is_err());
+        assert!(Start::parse("q").unwrap_err().contains("+LINE"));
+
+        let text = numbered(100);
+        let at = |start: Start| {
+            let mut p = Pager::new(doc(&[("a.txt", &text)]), &OPTS, 40, 10);
+            p.start_at(&start);
+            let top = top_text(&p);
+            // '' goes back to the top.
+            press(&mut p, "''");
+            (top, top_text(&p))
+        };
+        assert_eq!(at(Start::Line(50)).0, "line 50");
+        assert_eq!(at(Start::End).0, "line 92");
+        let search = |pattern: &str, backward| Start::Search {
+            pattern: pattern.into(),
+            backward,
+        };
+        assert_eq!(
+            at(search("line 7", false)),
+            ("line 7".into(), "line 1".into())
+        );
+        // Backward from the end: the last match.
+        assert_eq!(at(search("line 7", true)).0, "line 79");
+        assert_eq!(at(search("nothing", true)).0, "line 92");
     }
 
     #[test]

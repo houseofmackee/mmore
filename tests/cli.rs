@@ -894,3 +894,18 @@ fn tab_stops_can_be_changed() {
         .assert()
         .code(2);
 }
+
+#[test]
+fn unknown_start_command_is_an_error() {
+    mmore()
+        .args(["+q", "tests/fixtures/sample.md"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unknown start command '+q'"));
+    // When printing, a start command is accepted and the whole input is shown.
+    mmore()
+        .args(["+2", "tests/fixtures/hello.txt"])
+        .assert()
+        .success()
+        .stdout("hello\nworld\n");
+}

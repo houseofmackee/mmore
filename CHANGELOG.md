@@ -9,6 +9,9 @@ section here, so a version can only be released once it has one.
 
 - `--tabs N` (or `-x N`, as in `less`) sets the distance between tab stops.
 - The README explains how to use mmore as git's pager.
+- `+LINE`, `+G`, `+/PATTERN`, and `+?PATTERN` on the command line start at a line,
+  the end, the first match, or the last match, as in `less` and `more`;
+  `--pattern PATTERN` is the same as `+/PATTERN`.
 
 ### Changed
 

@@ -40,6 +40,9 @@ const AFTER_HELP: &str = concat!(
     "Config file: options as on the command line, one or more per line, and\n",
     "\"bind KEY ACTION\" lines (for example \"bind x quit\"); # starts a comment.\n",
     "\n",
+    "Start somewhere else in the first file: +LINE, +G (the end), +/PATTERN, or\n",
+    "+?PATTERN (the last match).\n",
+    "\n",
     "Press h while paging for the list of keys."
 );
 
@@ -55,6 +58,27 @@ pub fn args(config: &[String]) -> Vec<OsString> {
     let at = args.len().min(1);
     args.splice(at..at, extra.into_iter().map(OsString::from));
     args
+}
+
+/// Take a `+` start command (`+120`, `+G`, `+/pattern`) out of the arguments,
+/// as `less` and `more` take them; the last one counts. Arguments after `--` are
+/// file names.
+pub fn take_start(args: &mut Vec<OsString>) -> Option<String> {
+    let mut start = None;
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--" {
+            break;
+        }
+        match args[i].to_str().and_then(|a| a.strip_prefix('+')) {
+            Some(command) if !command.is_empty() => {
+                start = Some(command.to_string());
+                args.remove(i);
+            }
+            _ => i += 1,
+        }
+    }
+    start
 }
 
 /// What the config file sets.
@@ -260,6 +284,10 @@ pub struct Cli {
     #[arg(long, conflicts_with = "always_page")]
     pub no_pager: bool,
 
+    /// Start at the first line matching PATTERN (like +/PATTERN).
+    #[arg(long, value_name = "PATTERN")]
+    pub pattern: Option<String>,
+
     /// Page even if the content fits on one screen.
     #[arg(long)]
     pub always_page: bool,
@@ -315,6 +343,16 @@ pub fn man_page(out: &mut impl std::io::Write) -> std::io::Result<()> {
     for (name, what) in ENVIRONMENT {
         writeln!(out, ".TP\n\\fB{}\\fR\n{}", roff(name), roff(what))?;
     }
+    writeln!(out, ".SH START")?;
+    writeln!(
+        out,
+        "{}",
+        roff(
+            "A command line argument starting with + says where to start in the first file: \
+             +LINE starts at that line, +G at the end, +/PATTERN at the first match, and \
+             +?PATTERN at the last one. --pattern PATTERN is the same as +/PATTERN."
+        )
+    )?;
     writeln!(out, ".SH FILES")?;
     writeln!(out, ".TP\n\\fB~/.config/mmore/config\\fR")?;
     writeln!(
@@ -349,6 +387,18 @@ fn roff(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn start_commands_are_taken_out() {
+        let mut args: Vec<OsString> = ["mmore", "+120", "a.txt", "+/x y", "--", "+file"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        assert_eq!(take_start(&mut args).as_deref(), Some("/x y"));
+        assert_eq!(args, ["mmore", "a.txt", "--", "+file"]);
+        let mut none: Vec<OsString> = vec!["mmore".into(), "+".into()];
+        assert_eq!(take_start(&mut none), None);
+    }
 
     #[test]
     fn config_lines() {

@@ -479,6 +479,14 @@ def background():
     check("the cursor is at the start of a line after quitting", text.endswith(ALT_OFF + "\r"), repr(text[-12:]))
 
 
+def start_commands(n100):
+    # +LINE and +/pattern decide where the first screen starts.
+    out, code, snaps = run(f"{BIN} +50 {n100}", ["q"], rows=10, cols=40)
+    check("+50 starts at line 50", "\x1b[1;1H\x1b[2K50" in snaps[0].decode(errors="replace") and code == 0)
+    out, code, snaps = run(f"{BIN} --pattern 75 {n100}", ["q"], rows=10, cols=40)
+    check("--pattern starts at the first match, highlighted", "\x1b[1;1H\x1b[2K\x1b[7m75" in snaps[0].decode(errors="replace"))
+
+
 def config_keys(tmp, n100):
     # Keys bound in the config file: x quits, q is turned off, and the help
     # screen lists the bindings.
@@ -986,6 +994,7 @@ def main():
         mouse(n100)
         less_keys(tmp, n100)
         config_keys(tmp, n100)
+        start_commands(n100)
         remote_documents(tmp)
         startup_timing(tmp)
         git_pager(tmp)

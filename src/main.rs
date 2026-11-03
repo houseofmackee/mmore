@@ -56,7 +56,23 @@ fn run() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let cli = Cli::parse_from(cli::args(&config.args));
+    let mut args = cli::args(&config.args);
+    let start_command = cli::take_start(&mut args);
+    let cli = Cli::parse_from(args);
+    let start = match (&start_command, &cli.pattern) {
+        (Some(command), _) => match pager::Start::parse(command) {
+            Ok(start) => Some(start),
+            Err(e) => {
+                eprintln!("mmore: {e}");
+                return ExitCode::from(2);
+            }
+        },
+        (None, Some(pattern)) => Some(pager::Start::Search {
+            pattern: pattern.clone(),
+            backward: false,
+        }),
+        (None, None) => None,
+    };
     render::plain::set_tab_width(cli.tabs.into());
 
     if cli.list_themes {
@@ -112,6 +128,7 @@ fn run() -> ExitCode {
         hyperlinks,
         stdout_is_tty,
         keymap: config.keymap,
+        start,
     };
     match output(&cli, &settings, document, view) {
         Ok(()) if all_ok => ExitCode::SUCCESS,
@@ -432,6 +449,7 @@ struct View {
     hyperlinks: bool,
     stdout_is_tty: bool,
     keymap: pager::keys::Keymap,
+    start: Option<pager::Start>,
 }
 
 fn output(cli: &Cli, settings: &Settings, document: Document, view: View) -> io::Result<()> {
@@ -440,6 +458,7 @@ fn output(cli: &Cli, settings: &Settings, document: Document, view: View) -> io:
         hyperlinks,
         stdout_is_tty,
         keymap,
+        start,
     } = view;
     let size = crossterm::terminal::size().ok().filter(|_| stdout_is_tty);
     let Some((cols, rows)) = size.filter(|_| !cli.no_pager) else {
@@ -494,6 +513,7 @@ fn output(cli: &Cli, settings: &Settings, document: Document, view: View) -> io:
             reload: Some(&reload),
             fetch: Some(&fetch),
             keymap: &keymap,
+            start: start.as_ref(),
         },
     )
 }
