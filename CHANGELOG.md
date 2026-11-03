@@ -14,6 +14,8 @@ section here, so a version can only be released once it has one.
   `--pattern PATTERN` is the same as `+/PATTERN`.
 - `-X` (`--keep-screen`) leaves the last screen in the terminal after quitting,
   so it stays in view and in the scrollback.
+- `-s` (`--squeeze-blank`) shows runs of blank lines as one, as in `less` and
+  `cat`, also when printing and for piped input as it arrives.
 
 ### Changed
 

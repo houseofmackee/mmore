@@ -188,6 +188,8 @@ pub struct Document {
     pub front_matter: bool,
     /// Show source line numbers in a gutter.
     pub line_numbers: bool,
+    /// Show runs of blank lines as one (`-s`).
+    pub squeeze: bool,
 }
 
 impl Document {
@@ -421,6 +423,7 @@ mod tests {
             ascii: false,
             front_matter: true,
             line_numbers: false,
+            squeeze: false,
         }
     }
 

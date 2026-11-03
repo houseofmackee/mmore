@@ -278,6 +278,7 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
         ascii: cli.ascii,
         front_matter: !cli.no_front_matter,
         line_numbers: cli.line_numbers,
+        squeeze: cli.squeeze_blank,
     };
     (document, all_ok)
 }
@@ -536,6 +537,14 @@ fn print(document: &Document, width: usize, color: ColorMode, hyperlinks: bool) 
                 writeln!(out, "{}", ansi::render(&line, color, None))?;
             }
         }
+        // With -s, a blank line after a blank line is left out.
+        let mut blank = false;
+        let mut squeezed = |line: &Line| {
+            let this = render::is_blank(line);
+            let drop = document.squeeze && this && blank;
+            blank = this;
+            drop
+        };
         if let Some(stream) = &file.stream {
             let gutter = document.gutter_width(index);
             let mut printed = 0;
@@ -543,6 +552,9 @@ fn print(document: &Document, width: usize, color: ColorMode, hyperlinks: bool) 
                 let (_, done) = stream.wait_for(printed + 1, None);
                 for line in stream.lines_from(printed) {
                     printed += 1;
+                    if squeezed(&line) {
+                        continue;
+                    }
                     let line = if gutter > 0 {
                         document::numbered(line, Some(printed), gutter)
                     } else {
@@ -565,6 +577,9 @@ fn print(document: &Document, width: usize, color: ColorMode, hyperlinks: bool) 
             let mut result = Ok(());
             lazy.for_each_line(|line| {
                 number += 1;
+                if squeezed(&line) {
+                    return true;
+                }
                 let line = if gutter > 0 {
                     document::numbered(line, Some(number), gutter)
                 } else {
@@ -579,6 +594,9 @@ fn print(document: &Document, width: usize, color: ColorMode, hyperlinks: bool) 
         let rendered = document.render_one(index, width);
         let links = hyperlinks.then_some(rendered.links.as_slice());
         for line in &rendered.lines {
+            if squeezed(line) {
+                continue;
+            }
             writeln!(out, "{}", ansi::render(line, color, links))?;
         }
     }

@@ -9,6 +9,31 @@ pub mod table;
 
 use crate::style::Line;
 
+/// Whether a line shows nothing but spaces.
+pub fn is_blank(line: &Line) -> bool {
+    line.spans.iter().all(|s| s.text.trim().is_empty())
+}
+
+/// Drop blank lines that come right after a blank line (`-s`). `after_blank`
+/// says whether the line before these was blank; also returns whether the last
+/// line kept is.
+pub fn squeeze_blank(rendered: Rendered, after_blank: bool) -> (Rendered, bool) {
+    let mut out = Rendered {
+        links: rendered.links,
+        headings: rendered.headings,
+        ..Rendered::default()
+    };
+    let mut blank = after_blank;
+    for (line, source) in rendered.lines.into_iter().zip(rendered.source) {
+        let this = is_blank(&line);
+        if !(this && blank) {
+            out.push(line, source);
+        }
+        blank = this;
+    }
+    (out, blank)
+}
+
 /// A URL with a scheme ("https://...", "mailto:...").
 pub fn is_absolute_url(url: &str) -> bool {
     url.split_once(':').is_some_and(|(scheme, rest)| {
@@ -84,6 +109,26 @@ impl Rendered {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blank_runs_are_squeezed() {
+        let mut r = Rendered::default();
+        for (i, text) in ["a", "", " ", "", "b", "", "c", ""].iter().enumerate() {
+            r.push(Line::plain(*text), i);
+        }
+        let (out, ends_blank) = squeeze_blank(r, false);
+        let texts: Vec<String> = out.lines.iter().map(Line::text).collect();
+        assert_eq!(texts, ["a", "", "b", "", "c", ""]);
+        assert_eq!(out.source, [0, 1, 4, 5, 6, 7], "source lines are kept");
+        assert!(ends_blank);
+        // Continuing after a blank line drops a leading blank one.
+        let mut more = Rendered::default();
+        more.push(Line::plain(""), 8);
+        more.push(Line::plain("d"), 9);
+        let (out, ends_blank) = squeeze_blank(more, true);
+        assert_eq!(out.source, [9]);
+        assert!(!ends_blank);
+    }
 
     #[test]
     fn slugs_like_github() {

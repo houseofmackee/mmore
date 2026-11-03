@@ -909,3 +909,19 @@ fn unknown_start_command_is_an_error() {
         .success()
         .stdout("hello\nworld\n");
 }
+
+#[test]
+fn squeeze_blank_when_printing() {
+    mmore()
+        .arg("-s")
+        .write_stdin("a\n\n\n\nb\n \n\nc\n")
+        .assert()
+        .success()
+        .stdout("a\n\nb\n \nc\n");
+    mmore()
+        .args(["-s", "--color", "always", "-l", "rust"])
+        .write_stdin("fn a() {}\n\n\n\nfn b() {}\n")
+        .assert()
+        .success()
+        .stdout(predicate::function(|out: &str| out.lines().count() == 3));
+}

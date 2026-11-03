@@ -26,7 +26,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ansi::{self, ColorMode};
 use crate::document::{Document, File, LazyHighlight, gutter_span};
-use crate::render::{Heading, Rendered, is_absolute_url, slugs};
+use crate::render::{Heading, Rendered, is_absolute_url, slugs, squeeze_blank};
 use crate::stream::Stream;
 use crate::style::Line;
 use crate::wrap::{Wrapped, column_of, slice_columns, wrap_all, wrap_line};
@@ -286,6 +286,8 @@ struct View {
     /// Markdown headings, for `]`, `[`, and the table of contents.
     headings: Vec<Heading>,
     matches: RowMatches,
+    /// Whether the last line taken in is blank (for `-s` as input arrives).
+    ends_blank: bool,
 }
 
 impl View {
@@ -449,6 +451,11 @@ impl<'a> Pager<'a> {
             Some(filter) => keep_matching(rendered, filter),
             None => rendered,
         };
+        let (rendered, ends_blank) = if self.doc.squeeze {
+            squeeze_blank(rendered, false)
+        } else {
+            (rendered, false)
+        };
         let width = if self.chop { usize::MAX } else { width };
         let wrapped = wrap_all(rendered, width);
         let matches = self
@@ -467,6 +474,7 @@ impl<'a> Pager<'a> {
             lines,
             headings,
             matches,
+            ends_blank,
         };
         self.heading_cursor = None;
         if self.follow {
@@ -491,6 +499,7 @@ impl<'a> Pager<'a> {
             lines: 0,
             headings: Vec::new(),
             matches: RowMatches::default(),
+            ends_blank: false,
         });
     }
 
@@ -1500,6 +1509,9 @@ impl<'a> Pager<'a> {
         if let Some(filter) = &self.filter {
             rendered = keep_matching(rendered, filter);
         }
+        if self.doc.squeeze {
+            (rendered, self.view.ends_blank) = squeeze_blank(rendered, self.view.ends_blank);
+        }
         let mut more = wrap_all(rendered, self.view.width);
         // Match on the new rows while their line numbers still start at 0.
         let matches = self.search.as_ref().map(|s| s.row_matches(&more));
@@ -1938,6 +1950,7 @@ fn empty_view() -> View {
         lines: 0,
         headings: Vec::new(),
         matches: RowMatches::default(),
+        ends_blank: false,
     }
 }
 
@@ -2000,6 +2013,7 @@ mod tests {
             ascii: false,
             front_matter: true,
             line_numbers: false,
+            squeeze: false,
         }
     }
 
@@ -3035,6 +3049,31 @@ mod tests {
             "{}",
             screen(&p)
         );
+    }
+
+    #[test]
+    fn squeeze_shows_blank_runs_as_one_line() {
+        let mut d = doc(&[("a.txt", "a\n\n\n\nb\n\n\nc\n")]);
+        d.squeeze = true;
+        d.line_numbers = true;
+        let p = Pager::new(d, &OPTS, 40, 10);
+        let rows: Vec<String> = p.view.wrapped.rows.iter().map(Line::text).collect();
+        assert_eq!(rows, ["a", "", "b", "", "c"]);
+        // Line numbers stay those of the file.
+        assert!(plain_screen(&p).contains("  5 b"));
+
+        // Piped input arriving in pieces is squeezed across the pieces.
+        let (mut d, mut writer) = streamed();
+        d.squeeze = true;
+        let mut p = Pager::new(d, &OPTS, 40, 10);
+        use std::io::Write;
+        writer.write_all(b"x\n\n").unwrap();
+        pull(&mut p, 2);
+        writer.write_all(b"\n\ny\n").unwrap();
+        drop(writer);
+        pull(&mut p, 5);
+        let rows: Vec<String> = p.view.wrapped.rows.iter().map(Line::text).collect();
+        assert_eq!(rows, ["x", "", "y"]);
     }
 
     #[test]

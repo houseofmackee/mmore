@@ -284,6 +284,10 @@ pub struct Cli {
     #[arg(long, conflicts_with = "always_page")]
     pub no_pager: bool,
 
+    /// Show runs of blank lines as a single blank line.
+    #[arg(short = 's', long)]
+    pub squeeze_blank: bool,
+
     /// Leave the last screen in the terminal after quitting.
     #[arg(short = 'X', long)]
     pub keep_screen: bool,
