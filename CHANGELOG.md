@@ -10,6 +10,8 @@ section here, so a version can only be released once it has one.
 - GitLab (gitlab.com) and Codeberg addresses work like GitHub's: a repository or
   folder shows its README, a file page shows the file, and relative links lead
   to the repository's other files.
+- `--theme-light` and `--theme-dark` choose the theme for each kind of
+  background, so the automatic choice can use your favorite themes.
 
 ## [0.7.0] - 2026-11-03
 

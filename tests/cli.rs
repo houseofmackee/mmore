@@ -925,3 +925,35 @@ fn squeeze_blank_when_printing() {
         .success()
         .stdout(predicate::function(|out: &str| out.lines().count() == 3));
 }
+
+#[test]
+fn light_and_dark_themes_can_be_chosen_separately() {
+    let run = |colorfgbg: &str, args: &[&str]| {
+        let out = mmore_env()
+            .env("COLORFGBG", colorfgbg)
+            .args(["--color", "always"])
+            .args(args)
+            .arg("tests/fixtures/hello.rs")
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        out.stdout
+    };
+    let (light, dark) = ("0;15", "15;0");
+    let solarized = ["--theme", "Solarized (light)"];
+    let chosen = ["--theme-light", "Solarized (light)", "--theme-dark", "base16-mocha.dark"];
+    assert_eq!(run(light, &chosen), run(light, &solarized));
+    assert_eq!(run(dark, &chosen), run(dark, &["--theme", "base16-mocha.dark"]));
+    assert_ne!(run(dark, &chosen), run(dark, &[]));
+    // --theme wins over both.
+    let mut forced = chosen.to_vec();
+    forced.extend(["--theme", "InspiredGitHub"]);
+    assert_eq!(run(dark, &forced), run(dark, &["--theme", "InspiredGitHub"]));
+    // A wrong name is an error even when that theme would not be used.
+    mmore()
+        .args(["--theme-dark", "Nope", "tests/fixtures/hello.rs"])
+        .env("COLORFGBG", light)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unknown theme 'Nope'"));
+}

@@ -215,7 +215,9 @@ your color scheme.
 Without `--theme`, code is highlighted with `base16-ocean.dark`, or `InspiredGitHub`
 on a light background. To tell which it is, `mmore` checks `COLORFGBG`, then asks
 the terminal for its background color. If neither works, or over SSH, it assumes a
-dark background; set `--theme` (for example in `MMORE_OPTS`) to choose.
+dark background; set `--theme` (for example in `MMORE_OPTS`) to choose. To pick
+your own theme for each kind of background instead, set `--theme-light` and
+`--theme-dark` (in the config file, say); `--theme` still wins over both.
 
 Set `NO_COLOR` to turn colors off. Bold, underline, and reverse video are kept, so
 headings and search matches stay visible.

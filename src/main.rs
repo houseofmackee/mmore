@@ -76,7 +76,7 @@ fn run() -> ExitCode {
     render::plain::set_tab_width(cli.tabs.into());
 
     if cli.list_themes {
-        return finish(list_themes());
+        return finish(list_themes(&cli));
     }
     if cli.list_languages {
         return finish(list_languages());
@@ -84,14 +84,18 @@ fn run() -> ExitCode {
 
     let stdout_is_tty = io::stdout().is_terminal();
     let color = ColorMode::resolve(cli.color, stdout_is_tty);
-    let theme_name = match &cli.theme {
-        Some(name) => name.as_str(),
-        None => assets::default_theme_name(light_background(color, stdout_is_tty)),
-    };
-    let Some(theme) = assets::theme(theme_name) else {
-        eprintln!("mmore: unknown theme '{theme_name}' (see --list-themes)");
-        return ExitCode::from(2);
-    };
+    // Every theme named must exist, also the one not used this time.
+    for name in [&cli.theme, &cli.theme_light, &cli.theme_dark]
+        .into_iter()
+        .flatten()
+    {
+        if assets::theme(name).is_none() {
+            eprintln!("mmore: unknown theme '{name}' (see --list-themes)");
+            return ExitCode::from(2);
+        }
+    }
+    let theme_name = theme_for(&cli, || light_background(color, stdout_is_tty));
+    let theme = assets::theme(theme_name).expect("checked above");
     if let Some(lang) = &cli.language
         && detect::by_language(assets::syntaxes(), lang).is_none()
     {
@@ -603,11 +607,28 @@ fn print(document: &Document, width: usize, color: ColorMode, hyperlinks: bool) 
     out.flush()
 }
 
-fn list_themes() -> io::Result<()> {
+/// The theme to use: `--theme`, or for the background (`light`, asked only when
+/// needed) `--theme-light` or `--theme-dark`, or the default for it.
+fn theme_for(cli: &Cli, light: impl FnOnce() -> bool) -> &str {
+    if let Some(name) = &cli.theme {
+        return name;
+    }
+    let light = light();
+    let chosen = if light {
+        &cli.theme_light
+    } else {
+        &cli.theme_dark
+    };
+    chosen
+        .as_deref()
+        .unwrap_or_else(|| assets::default_theme_name(light))
+}
+
+fn list_themes(cli: &Cli) -> io::Result<()> {
     let mut out = BufWriter::new(io::stdout().lock());
     let stdout_is_tty = io::stdout().is_terminal();
     let color = ColorMode::resolve(When::Auto, stdout_is_tty);
-    let default = assets::default_theme_name(light_background(color, stdout_is_tty));
+    let default = theme_for(cli, || light_background(color, stdout_is_tty));
     for name in assets::themes().themes.keys() {
         let marker = if name == default { " (default)" } else { "" };
         writeln!(out, "{name}{marker}")?;
