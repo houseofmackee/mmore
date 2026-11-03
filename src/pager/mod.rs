@@ -270,6 +270,14 @@ struct SearchOrigin {
 /// What `--watch` compares to notice that a file changed.
 type Stamp = (std::time::SystemTime, u64);
 
+/// The path to watch for changes: a file on disk, read whole or decompressed
+/// as it was read. Piped input and named pipes have nothing to compare.
+fn watchable(file: &File) -> Option<&Path> {
+    file.path
+        .as_deref()
+        .filter(|p| file.stream.is_none() || p.is_file())
+}
+
 fn stamp(path: &Path) -> Option<Stamp> {
     let meta = std::fs::metadata(path).ok()?;
     Some((meta.modified().ok()?, meta.len()))
@@ -287,12 +295,7 @@ impl<'a> Pager<'a> {
         let stamps = doc
             .files
             .iter()
-            .map(|f| {
-                f.path
-                    .as_deref()
-                    .filter(|_| f.stream.is_none())
-                    .and_then(stamp)
-            })
+            .map(|f| watchable(f).and_then(stamp))
             .collect();
         let mut pager = Pager {
             doc,
@@ -1039,6 +1042,10 @@ impl<'a> Pager<'a> {
     fn edit_target(&self) -> Result<(std::path::PathBuf, usize), String> {
         let file = &self.doc.files[self.file];
         match &file.path {
+            Some(path) if crate::compress::format_of(path).is_some() => Err(format!(
+                "{} is compressed, so it cannot be edited (R reloads it)",
+                file.name
+            )),
             Some(path) if file.stream.is_none() => Ok((path.clone(), self.view.anchor() + 1)),
             _ => Err(format!("{} cannot be opened in an editor", file.name)),
         }
@@ -1051,8 +1058,7 @@ impl<'a> Pager<'a> {
             return false;
         }
         self.watched_at = std::time::Instant::now();
-        let file = &self.doc.files[self.file];
-        let Some(path) = file.path.as_deref().filter(|_| file.stream.is_none()) else {
+        let Some(path) = watchable(&self.doc.files[self.file]) else {
             return false;
         };
         let now = stamp(path);
@@ -1070,8 +1076,14 @@ impl<'a> Pager<'a> {
             return;
         };
         let Some(path) = self.doc.files[self.file].path.clone() else {
+            self.message = Some("Piped input cannot be reloaded".into());
             return;
         };
+        // Opening a named pipe again would wait for a new writer.
+        if std::fs::metadata(&path).is_ok_and(|m| !m.is_file()) {
+            self.message = Some(format!("{} cannot be reloaded", path.display()));
+            return;
+        }
         self.stamps[self.file] = stamp(&path);
         match reload(&path) {
             Some(file) => {

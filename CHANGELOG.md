@@ -11,6 +11,11 @@ section here, so a version can only be released once it has one.
   PowerShell) and a manual page (`mmore --man`), which the Homebrew formula
   installs.
 
+### Changed
+
+- Compressed files can be reloaded with `R` and watched with `--watch`.
+- `R` on piped input says that it cannot be reloaded, instead of doing nothing.
+
 ## [0.4.1] - 2026-11-03
 
 ### Fixed

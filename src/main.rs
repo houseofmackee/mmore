@@ -12,7 +12,7 @@ mod stream;
 mod style;
 mod wrap;
 
-use std::io::{self, BufWriter, IsTerminal, Write};
+use std::io::{self, BufWriter, IsTerminal, Read, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -147,16 +147,11 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
     for origin in origins {
         // Compressed files are decompressed as they are read.
         if let Origin::File(path) = origin
-            && path.is_file()
             && let Some(format) = compress::format_of(path)
         {
             match compress::open(path, format) {
                 Ok(pipe) => {
-                    let naming = Naming {
-                        name: origin.display_name(),
-                        detect: Origin::File(compress::inner_name(path, format)),
-                        path: None,
-                    };
+                    let naming = Naming::compressed(path, format);
                     let language = cli.language.as_deref();
                     files.push(stream_input(cli, settings, &naming, pipe, language));
                 }
@@ -234,8 +229,8 @@ fn collect(cli: &Cli, origins: &[Origin], settings: &Settings) -> (Document, boo
 }
 
 /// What an input is called, what name decides how it is shown, and where it can
-/// be edited. Usually all the same file; a compressed `notes.md.gz` is shown
-/// under its own name, rendered as `notes.md`, and cannot be edited.
+/// be loaded again. Usually all the same file; a compressed `notes.md.gz` is
+/// shown under its own name and rendered as `notes.md`.
 struct Naming {
     name: String,
     detect: Origin,
@@ -243,6 +238,14 @@ struct Naming {
 }
 
 impl Naming {
+    fn compressed(path: &std::path::Path, format: &compress::Format) -> Self {
+        Naming {
+            name: Origin::File(path.to_path_buf()).display_name(),
+            detect: Origin::File(compress::inner_name(path, format)),
+            path: Some(path.to_path_buf()),
+        }
+    }
+
     fn of(origin: &Origin) -> Self {
         Naming {
             name: origin.display_name(),
@@ -338,7 +341,7 @@ fn stream_input(
     stream.drop_text();
     File {
         name,
-        path: None,
+        path: naming.path.clone(),
         content: Section::Plain,
         raw: Vec::new(),
         stream: Some(stream),
@@ -392,19 +395,26 @@ fn output(
     if !cli.always_page && streams_done && document.fits(cols as usize, rows as usize) {
         return print(&document, cols as usize, color, hyperlinks);
     }
-    // After `v`, the edited file is loaded again the same way.
+    // After `v`, `R`, or a change seen by `--watch`, and for a followed link, a
+    // file is loaded the same way. Compressed files are decompressed whole.
     let reload = |path: &std::path::Path| -> Option<File> {
         let origin = Origin::File(path.to_path_buf());
-        let source = Source::load(origin.clone()).ok()?;
+        let (source, naming) = match compress::format_of(path) {
+            Some(format) => {
+                let mut bytes = Vec::new();
+                compress::open(path, format)
+                    .ok()?
+                    .read_to_end(&mut bytes)
+                    .ok()?;
+                let source = Source { origin, bytes };
+                (source, Naming::compressed(path, format))
+            }
+            None => (Source::load(origin.clone()).ok()?, Naming::of(&origin)),
+        };
         if source.is_binary() && !cli.force {
             return None;
         }
-        Some(text_file(
-            cli,
-            &Naming::of(&origin),
-            source.text(),
-            settings,
-        ))
+        Some(text_file(cli, &naming, source.text(), settings))
     };
     pager::run(
         document,

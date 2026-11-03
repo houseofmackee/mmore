@@ -220,8 +220,8 @@ Files compressed with gzip, bzip2, xz, or zstd are recognized by their first
 bytes and shown decompressed, using the `gzip`, `bzip2`, `xz`, or `zstd` command
 (which must be installed). What is inside is judged by the name without the
 compression extension, so `guide.md.gz` is rendered as Markdown and `main.rs.xz`
-is highlighted as Rust. Compressed files cannot be opened in the editor (`v`) or
-reloaded.
+is highlighted as Rust. `R` and `--watch` decompress them again; they cannot be
+opened in the editor (`v`).
 
 ## When output is not a terminal
 

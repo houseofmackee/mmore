@@ -594,6 +594,24 @@ def reading_documents(tmp):
     out, code, _ = run(f"{BIN} {packed}.gz", [], frame=False)
     check("compressed Markdown is rendered", "Packed title" in out and "# Packed" not in out and code == 0)
 
+    # A compressed file is watched and reloaded like any other, but not edited.
+    zlog = os.path.join(tmp, "zlog.txt")
+
+    def write_gz(text):
+        with open(zlog, "w") as f:
+            f.write(text)
+        subprocess.run(["gzip", "-f", zlog], check=True)
+
+    write_gz("first version\n")
+
+    def change_gz():
+        time.sleep(0.3)
+        write_gz("second version\n")
+
+    out, code, snaps = run(f"{BIN} --watch --always-page {zlog}.gz", [change_gz, ("SHOWN", "second version"), "v", "q"], rows=10, cols=200)
+    check("--watch reloads a compressed file", "second version" in snaps[2][len(snaps[0]):].decode(errors="replace"))
+    check("v explains that compressed files cannot be edited", "is compressed" in after(snaps, 2) and code == 0)
+
 
 def input_colors(tmp):
     log = os.path.join(tmp, "colors.log")

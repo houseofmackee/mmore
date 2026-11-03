@@ -45,7 +45,11 @@ const FORMATS: &[Format] = &[
 ];
 
 /// The compression format of the file at `path`, judged by its first bytes.
+/// Only regular files: opening a named pipe to look would wait for a writer.
 pub fn format_of(path: &Path) -> Option<&'static Format> {
+    if !path.is_file() {
+        return None;
+    }
     let mut head = [0u8; 6];
     let mut file = File::open(path).ok()?;
     let mut read = 0;
