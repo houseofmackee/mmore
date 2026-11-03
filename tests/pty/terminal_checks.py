@@ -624,7 +624,8 @@ def streaming():
 
     # F follows new input at the end.
     follow = f"(seq 1 20; sleep 1; seq 21 60; sleep 4) | {BIN}"
-    out, code, snaps = run(follow, ["F", "WAIT", "q"], rows=10, cols=40)
+    # Wait for line 60 on the last content row, however slow the machine is.
+    out, code, snaps = run(follow, ["F", ("UNTIL", "\x1b[9;1H\x1b[2K60"), "q"], rows=10, cols=40)
     followed = after(snaps, 1)
     check(
         "F keeps the newest input in view",
